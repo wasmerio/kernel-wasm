@@ -13,6 +13,9 @@
 #include <linux/security.h>
 #include <linux/kthread.h>
 
+#include "vm.h"
+#include "request.h"
+
 #define WASM_RUN_CODE 0x1001
 
 const char *CLASS_NAME = "wasm";
@@ -101,7 +104,18 @@ static ssize_t wd_write(struct file *_file, const char *data, size_t len, loff_t
 }
 
 static ssize_t handle_wasm_run_code(struct file *_file, void *arg) {
-    return -EINVAL;
+    int err;
+    struct run_code_request req;
+    struct execution_engine ee;
+
+    if(copy_from_user(&req, arg, sizeof(struct run_code_request))) {
+        return -EFAULT;
+    }
+    if((err = init_execution_engine(&req, &ee)) < 0) {
+        return err;
+    }
+    destroy_execution_engine(&ee);
+    return 0;
 }
 
 #define DISPATCH_CMD(cmd, f) case cmd: return (f)(file, (void *) arg);
