@@ -12,4 +12,8 @@ struct run_code_request {
     uint32_t table_count;
     uint64_t __user *globals;
     uint32_t global_count;
+
+    uint32_t entry_offset;
+    uint64_t *params;
+    uint32_t param_count;
 };

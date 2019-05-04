@@ -57,7 +57,12 @@ int init_execution_engine(const struct run_code_request *request, struct executi
     int err;
     int i;
 
-    if(request->code_len > MAX_CODE_SIZE || request->memory_len > MAX_MEMORY_SIZE || request->global_count > MAX_GLOBAL_COUNT) {
+    if(
+        request->code_len == 0 ||
+        request->code_len > MAX_CODE_SIZE ||
+        request->memory_len > MAX_MEMORY_SIZE ||
+        request->global_count > MAX_GLOBAL_COUNT
+    ) {
         return -EINVAL;
     }
 
@@ -85,7 +90,7 @@ int init_execution_engine(const struct run_code_request *request, struct executi
         goto fail_code_backing;
     }
 
-    if(request->memory) {
+    if(request->memory && request->memory_len) {
         ee->local_memory_ptr_backing = &ee->local_memory_backing;
         ee->local_memory_backing.base = kmalloc(request->memory_len, GFP_KERNEL);
         if(ee->local_memory_backing.base == NULL || IS_ERR(ee->local_memory_backing.base)) {
@@ -99,7 +104,7 @@ int init_execution_engine(const struct run_code_request *request, struct executi
         ee->local_memory_backing.bound = request->memory_len;
         ee->ctx.memories = &ee->local_memory_ptr_backing;
     }
-    if(request->globals) {
+    if(request->globals && request->global_count) {
         ee->local_global_ptr_backing = kmalloc(sizeof(uint64_t *) * request->global_count, GFP_KERNEL);
         if(ee->local_global_ptr_backing == NULL || IS_ERR(ee->local_global_ptr_backing)) {
             err = -ENOMEM;
@@ -150,4 +155,10 @@ void destroy_execution_engine(struct execution_engine *ee) {
     kfree(ee->local_memory_backing.base);
     set_memory_nx((unsigned long) ee->code, num_pages);
     kfree(ee->code_backing);
+}
+
+uint64_t ee_call0(struct execution_engine *ee, uint32_t offset) {
+    typedef uint64_t(*func)(struct vmctx *);
+    func f = (func) (ee->code + offset);
+    return f(&ee->ctx);
 }

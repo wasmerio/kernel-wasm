@@ -105,6 +105,7 @@ static ssize_t wd_write(struct file *_file, const char *data, size_t len, loff_t
 
 static ssize_t handle_wasm_run_code(struct file *_file, void *arg) {
     int err;
+    uint64_t ret;
     struct run_code_request req;
     struct execution_engine ee;
 
@@ -113,6 +114,21 @@ static ssize_t handle_wasm_run_code(struct file *_file, void *arg) {
     }
     if((err = init_execution_engine(&req, &ee)) < 0) {
         return err;
+    }
+    printk(KERN_INFO
+        "Initialized execution engine, code_backing = %px, code = %px, global_backing = %px, global_ptr_backing = %px, code_size = %u, memory_size = %lu\n",
+        ee.code_backing,
+        ee.code,
+        ee.local_global_backing,
+        ee.local_global_ptr_backing,
+        ee.code_len,
+        ee.local_memory_backing.bound
+    );
+    if(req.param_count != 0) {
+        printk(KERN_INFO "invalid param count\n");
+    } else {
+        ret = ee_call0(&ee, req.entry_offset);
+        printk(KERN_INFO "result = %llu\n", ret);
     }
     destroy_execution_engine(&ee);
     return 0;
