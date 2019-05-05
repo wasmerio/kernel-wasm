@@ -19,6 +19,8 @@
 
 #define WASM_LOAD_CODE 0x1001
 #define WASM_RUN_CODE 0x1002
+#define WASM_READ_MEMORY 0x1003
+#define WASM_WRITE_MEMORY 0x1004
 
 const char *CLASS_NAME = "wasm";
 const char *DEVICE_NAME = "wasmctl";
@@ -189,6 +191,50 @@ static int code_runner(void *data) {
     return 0;
 }
 
+static ssize_t handle_wasm_read_memory(struct file *f, void *arg) {
+    struct privileged_session *sess = f->private_data;
+    struct read_memory_request req;
+    uint8_t *slice;
+
+    if(copy_from_user(&req, arg, sizeof(struct read_memory_request))) {
+        return -EFAULT;
+    }
+    if(!sess->ready) {
+        return -EINVAL;
+    }
+
+    slice = vmctx_get_memory_slice(&sess->ee.ctx, req.offset, req.len);
+    if(!slice) {
+        return -EINVAL;
+    }
+    if(copy_to_user(req.out, slice, req.len)) {
+        return -EFAULT;
+    }
+    return 0;
+}
+
+static ssize_t handle_wasm_write_memory(struct file *f, void *arg) {
+    struct privileged_session *sess = f->private_data;
+    struct write_memory_request req;
+    uint8_t *slice;
+
+    if(copy_from_user(&req, arg, sizeof(struct write_memory_request))) {
+        return -EFAULT;
+    }
+    if(!sess->ready) {
+        return -EINVAL;
+    }
+
+    slice = vmctx_get_memory_slice(&sess->ee.ctx, req.offset, req.len);
+    if(!slice) {
+        return -EINVAL;
+    }
+    if(copy_from_user(slice, req.in, req.len)) {
+        return -EFAULT;
+    }
+    return 0;
+}
+
 static ssize_t handle_wasm_run_code(struct file *f, void *arg) {
     int ret;
     int made_nx = 0;
@@ -196,6 +242,7 @@ static ssize_t handle_wasm_run_code(struct file *f, void *arg) {
     struct code_runner_task task;
     struct privileged_session *sess = f->private_data;
     struct task_struct *runner_ts;
+    struct run_code_result result;
 
     if(copy_from_user(&req, arg, sizeof(struct run_code_request))) {
         return -EFAULT;
@@ -228,14 +275,26 @@ static ssize_t handle_wasm_run_code(struct file *f, void *arg) {
     ret = kthread_stop(runner_ts); // FIXME: Is it correct to use kthread_stop in this way?
     if(ret != 0) {
         printk(KERN_INFO "bad result from runner thread: %d\n", ret);
+        result.success = 0;
+        result.retval = 0;
     } else {
         printk(KERN_INFO "result = %llu\n", task.ret);
+        result.success = 1;
+        result.retval = task.ret;
     }
 
     put_task_struct(runner_ts);
     while(down_trylock(&task.sem) == 0); // address the race condition in forceful termination
     if(made_nx) {
         ee_make_code_x(&sess->ee);
+    }
+
+    if(copy_to_user(
+        req.result,
+        &result,
+        sizeof(struct run_code_result))
+    ) {
+        return -EFAULT;
     }
     return 0;
 }
@@ -246,6 +305,8 @@ static ssize_t wd_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
     switch(cmd) {
         DISPATCH_CMD(WASM_LOAD_CODE, handle_wasm_load_code)
         DISPATCH_CMD(WASM_RUN_CODE, handle_wasm_run_code)
+        DISPATCH_CMD(WASM_READ_MEMORY, handle_wasm_read_memory)
+        DISPATCH_CMD(WASM_WRITE_MEMORY, handle_wasm_write_memory)
         default:
             return -EINVAL;
     }
