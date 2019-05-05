@@ -11,7 +11,7 @@ struct table_entry_request {
     uint32_t sig_id;
 };
 
-struct run_code_request {
+struct load_code_request {
     uint8_t __user *code;
     uint32_t code_len;
     uint8_t __user *memory;
@@ -25,7 +25,9 @@ struct run_code_request {
     uint32_t imported_func_count;
     uint32_t *dynamic_sigindices;
     uint32_t dynamic_sigindice_count;
+};
 
+struct run_code_request {
     uint32_t entry_offset;
     uint64_t *params;
     uint32_t param_count;

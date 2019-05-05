@@ -2,6 +2,7 @@
 
 #include "request.h"
 #include <linux/set_memory.h>
+#include <linux/sched/mm.h>
 
 #define MAX_CODE_SIZE (1048576 * 8)
 #define MAX_MEMORY_SIZE (1048576 * 16)
@@ -9,6 +10,8 @@
 #define MAX_IMPORT_COUNT 128
 #define MAX_DYNAMIC_SIGINDICE_COUNT 8192
 #define MAX_TABLE_COUNT 1024
+#define STACK_SIZE (2 * 1048576)
+#define STACK_GUARD_SIZE 8192
 
 struct local_memory;
 struct local_table;
@@ -63,10 +66,23 @@ struct execution_engine {
     struct vm_intrinsics intrinsics_backing;
     uint64_t *local_global_backing;
     uint64_t **local_global_ptr_backing;
-    uint8_t *code_backing;
     uint8_t *code;
     uint32_t code_len;
+    uint8_t *stack_begin;
+    uint8_t *stack_end;
+    uint8_t *stack_backing;
+    struct mm_struct *mm;
 };
+
+// We are assuming that no concurrent access to a session would ever happen - is this true?
+struct privileged_session {
+    int ready;
+    struct execution_engine ee;
+};
+
+void init_privileged_session(struct privileged_session *sess) {
+    sess->ready = 0;
+}
 
 static inline unsigned long round_up_to_page_size(unsigned long x) {
     return (x + 4095ul) & (~4095ul);
@@ -121,16 +137,20 @@ static int resolve_import(const char *name, struct vmctx *ctx, struct imported_f
 
 static int32_t wasm_memory_grow(struct vmctx *ctx, size_t memory_index, uint32_t pages) {
     uint8_t *new_memory;
-    unsigned long old_size;
+    unsigned long old_size, delta;
 
     if(ctx->memories) {
         old_size = (*ctx->memories)->bound;
-        new_memory = krealloc((*ctx->memories)->base, (*ctx->memories)->bound + (unsigned long) pages * 65536, GFP_KERNEL);
+        delta = (unsigned long) pages * 65536;
+        new_memory = vmalloc(old_size + delta);
         if(!new_memory) {
             return -1;
         }
+        memcpy(new_memory, (*ctx->memories)->base, old_size);
+        memset(new_memory + old_size, 0, delta);
+        vfree((*ctx->memories)->base);
         (*ctx->memories)->base = new_memory;
-        (*ctx->memories)->bound += (unsigned long) pages * 65536;
+        (*ctx->memories)->bound += delta;
         return old_size / 65536;
     } else {
         return -1;
@@ -142,8 +162,93 @@ static int32_t wasm_memory_size(struct vmctx *ctx, size_t memory_index) {
     else return 0;
 }
 
-int init_execution_engine(const struct run_code_request *request, struct execution_engine *ee) {
-    unsigned long num_pages;
+/*
+static void make_ro(struct mm_struct *mm, unsigned long begin, unsigned long end) {
+    pgd_t *pgd;
+    p4d_t *p4d;
+    pud_t *pud;
+    pmd_t *pmd;
+    pte_t *pte;
+
+    unsigned long addr = begin;
+
+    while(addr < end) {
+        pgd = pgd_offset(mm, addr);
+        if (pgd_none(*pgd)) {
+            addr += PAGE_SIZE;
+            continue;
+        }
+        p4d = p4d_offset(pgd, addr);
+        if (p4d_none(*p4d)) {
+            addr += PAGE_SIZE;
+            continue;
+        }
+        pud = pud_offset(p4d, addr);
+        if (pud_none(*pud)) {
+            addr += PAGE_SIZE;
+            continue;
+        }
+        pmd = pmd_offset(pud, addr);
+        if (pmd_none(*pmd)) {
+            addr += PAGE_SIZE;
+            continue;
+        }
+        pte = pte_offset_map(pmd, addr);
+        if (pte_present(*pte)){
+            *pte = pte_wrprotect(*pte);         
+        }
+        addr += PAGE_SIZE;
+    }
+}
+
+static void make_rw(struct mm_struct *mm, unsigned long begin, unsigned long end) {
+    pgd_t *pgd;
+    p4d_t *p4d;
+    pud_t *pud;
+    pmd_t *pmd;
+    pte_t *pte;
+
+    unsigned long addr = begin;
+
+    while(addr < end) {
+        pgd = pgd_offset(mm, addr);
+        if (pgd_none(*pgd)) {
+            addr += PAGE_SIZE;
+            continue;
+        }
+        p4d = p4d_offset(pgd, addr);
+        if (p4d_none(*p4d)) {
+            addr += PAGE_SIZE;
+            continue;
+        }
+        pud = pud_offset(p4d, addr);
+        if (pud_none(*pud)) {
+            addr += PAGE_SIZE;
+            continue;
+        }
+        pmd = pmd_offset(pud, addr);
+        if (pmd_none(*pmd)) {
+            addr += PAGE_SIZE;
+            continue;
+        }
+        pte = pte_offset_map(pmd, addr);
+        if (pte_present(*pte)){
+            *pte = pte_mkwrite(*pte);         
+        }
+        addr += PAGE_SIZE;
+    }
+}
+*/
+
+void ee_make_code_nx(struct execution_engine *ee) {
+    set_memory_nx((unsigned long) ee->code, round_up_to_page_size(ee->code_len) / 4096);
+}
+
+void ee_make_code_x(struct execution_engine *ee) {
+    set_memory_x((unsigned long) ee->code, round_up_to_page_size(ee->code_len) / 4096);
+}
+
+int init_execution_engine(const struct load_code_request *request, struct execution_engine *ee) {
     int err;
     int i;
     struct import_request import_req;
@@ -163,31 +268,27 @@ int init_execution_engine(const struct run_code_request *request, struct executi
 
     memset(ee, 0, sizeof(struct execution_engine));
 
-    // Initialize backing code storage.
-    ee->code_backing = kmalloc(request->code_len + 8192, GFP_KERNEL);
-    if(ee->code_backing == NULL) {
-        return -ENOMEM;
+    // Initialize code storage.
+    ee->code = __vmalloc(round_up_to_page_size(request->code_len), GFP_KERNEL, PAGE_KERNEL_EXEC);
+    if(ee->code == NULL) {
+        err = -ENOMEM;
+        goto fail;
     }
-
-    // Align to page boundary.
-    ee->code = (uint8_t *) round_up_to_page_size((unsigned long) ee->code_backing);
+    if((((unsigned long) ee->code) & 4095) != 0) {
+        printk(KERN_INFO "Executable memory not aligned to page boundary\n");
+        err = -EINVAL;
+        goto fail;
+    }
     if(copy_from_user(ee->code, request->code, request->code_len)) {
         err = -EFAULT;
-        goto fail_before_set_code_x;
+        goto fail;
     }
 
     ee->code_len = request->code_len;
 
-    // Set execution permission.
-    num_pages = round_up_to_page_size(request->code_len) / 4096;
-    if(set_memory_x((unsigned long) ee->code, num_pages)) {
-        err = -EFAULT;
-        goto fail_before_set_code_x;
-    }
-
     if(request->memory && request->memory_len) {
         ee->local_memory_ptr_backing = &ee->local_memory_backing;
-        ee->local_memory_backing.base = kmalloc(request->memory_len, GFP_KERNEL);
+        ee->local_memory_backing.base = vmalloc(request->memory_len);
         if(ee->local_memory_backing.base == NULL) {
             err = -ENOMEM;
             goto fail;
@@ -200,12 +301,12 @@ int init_execution_engine(const struct run_code_request *request, struct executi
         ee->ctx.memories = &ee->local_memory_ptr_backing;
     }
     if(request->globals && request->global_count) {
-        ee->local_global_ptr_backing = kmalloc(sizeof(uint64_t *) * request->global_count, GFP_KERNEL);
+        ee->local_global_ptr_backing = vmalloc(sizeof(uint64_t *) * request->global_count);
         if(ee->local_global_ptr_backing == NULL) {
             err = -ENOMEM;
             goto fail;
         }
-        ee->local_global_backing = kmalloc(sizeof(uint64_t) * request->global_count, GFP_KERNEL);
+        ee->local_global_backing = vmalloc(sizeof(uint64_t) * request->global_count);
         if(ee->local_global_backing == NULL) {
             err = -ENOMEM;
             goto fail;
@@ -220,7 +321,7 @@ int init_execution_engine(const struct run_code_request *request, struct executi
         ee->ctx.globals = ee->local_global_ptr_backing;
     }
     if(request->imported_funcs && request->imported_func_count) {
-        ee->ctx.imported_funcs = kmalloc(sizeof(struct imported_func) * request->imported_func_count, GFP_KERNEL);
+        ee->ctx.imported_funcs = vmalloc(sizeof(struct imported_func) * request->imported_func_count);
         if(ee->ctx.imported_funcs == NULL) {
             err = -ENOMEM;
             goto fail;
@@ -239,7 +340,7 @@ int init_execution_engine(const struct run_code_request *request, struct executi
         }
     }
     if(request->dynamic_sigindices && request->dynamic_sigindice_count) {
-        ee->ctx.dynamic_sigindices = kmalloc(sizeof(uint32_t) * request->dynamic_sigindice_count, GFP_KERNEL);
+        ee->ctx.dynamic_sigindices = vmalloc(sizeof(uint32_t) * request->dynamic_sigindice_count);
         if(ee->ctx.dynamic_sigindices == NULL) {
             err = -ENOMEM;
             goto fail;
@@ -256,7 +357,7 @@ int init_execution_engine(const struct run_code_request *request, struct executi
     if(request->table && request->table_count) {
         ee->local_table_ptr_backing = &ee->local_table_backing;
 
-        ee->local_table_backing.base = kmalloc(sizeof(struct anyfunc) * request->table_count, GFP_KERNEL);
+        ee->local_table_backing.base = vmalloc(sizeof(struct anyfunc) * request->table_count);
         if(ee->local_table_backing.base == NULL) {
             err = -ENOMEM;
             goto fail;
@@ -285,36 +386,45 @@ int init_execution_engine(const struct run_code_request *request, struct executi
     ee->intrinsics_backing.memory_grow = wasm_memory_grow;
     ee->intrinsics_backing.memory_size = wasm_memory_size;
 
+    ee->stack_backing = vmalloc(STACK_SIZE);
+    if(!ee->stack_backing) {
+        err = -ENOMEM;
+        goto fail;
+    }
+    ee->stack_begin = (void *) round_up_to_page_size((unsigned long) ee->stack_backing);
+    ee->stack_end = (void *) (((unsigned long) ee->stack_backing + STACK_SIZE) & (~0xful)); // 16-byte alignment
+
+    ee->mm = current->mm;
+    mmgrab(ee->mm);
+    //make_ro(ee->mm, (unsigned long) ee->stack_begin, (unsigned long) ee->stack_begin + STACK_GUARD_SIZE); // stack guard
+
     return 0;
 
     fail:
-    kfree(ee->local_table_backing.base);
-    kfree(ee->ctx.dynamic_sigindices);
-    kfree(ee->ctx.imported_funcs);
-    kfree(ee->local_global_backing);
-    kfree(ee->local_global_ptr_backing);
-    kfree(ee->local_memory_backing.base);
-    set_memory_nx((unsigned long) ee->code, num_pages);
-
-    fail_before_set_code_x:
-    kfree(ee->code_backing);
+    vfree(ee->stack_backing);
+    vfree(ee->local_table_backing.base);
+    vfree(ee->ctx.dynamic_sigindices);
+    vfree(ee->ctx.imported_funcs);
+    vfree(ee->local_global_backing);
+    vfree(ee->local_global_ptr_backing);
+    vfree(ee->local_memory_backing.base);
+    vfree(ee->code);
 
     return err;
 }
 
 void destroy_execution_engine(struct execution_engine *ee) {
-    int num_pages;
+    //make_rw(ee->mm, (unsigned long) ee->stack_begin, (unsigned long) ee->stack_begin + STACK_GUARD_SIZE);
+    mmdrop(ee->mm);
 
-    num_pages = round_up_to_page_size(ee->code_len) / 4096;
-
-    kfree(ee->local_table_backing.base);
-    kfree(ee->ctx.dynamic_sigindices);
-    kfree(ee->ctx.imported_funcs);
-    kfree(ee->local_global_backing);
-    kfree(ee->local_global_ptr_backing);
-    kfree(ee->local_memory_backing.base);
-    set_memory_nx((unsigned long) ee->code, num_pages);
-    kfree(ee->code_backing);
+    vfree(ee->stack_backing);
+    vfree(ee->local_table_backing.base);
+    vfree(ee->ctx.dynamic_sigindices);
+    vfree(ee->ctx.imported_funcs);
+    vfree(ee->local_global_backing);
+    vfree(ee->local_global_ptr_backing);
+    vfree(ee->local_memory_backing.base);
+    vfree(ee->code);
 }
 
 uint64_t ee_call0(struct execution_engine *ee, uint32_t offset) {
