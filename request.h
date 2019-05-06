@@ -4,6 +4,7 @@
 
 struct import_request {
     char name[64];
+    uint32_t param_count;
 };
 
 struct table_entry_request {

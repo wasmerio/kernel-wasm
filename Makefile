@@ -1,5 +1,5 @@
 obj-m += linux-ext-wasm.o
-linux-ext-wasm-objs += ext.o uapi.o
+linux-ext-wasm-objs += ext.o uapi.o kapi.o vm.o
 HDR_PATH := /lib/modules/$(shell uname -r)/build
 
 all:
