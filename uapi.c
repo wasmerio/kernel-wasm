@@ -162,11 +162,43 @@ struct code_runner_task {
     struct execution_engine *ee;
     struct run_code_request *req;
     uint64_t ret;
+
+    struct file *stdin, *stdout, *stderr;
 };
 
 void code_runner_inner(struct Coroutine *co) {
+    int fd;
+
     struct code_runner_task *task = co->private_data;
     up(&task->sem);
+
+    fd = ee_take_and_register_file(task->ee, task->stdin);
+    if(fd < 0) {
+        printk(KERN_INFO "Unable to get fd for stdin\n");
+        fput(task->stderr);
+        fput(task->stdout);
+        fput(task->stdin);
+        return;
+    }
+    printk(KERN_INFO "stdin = %d\n", fd);
+
+    fd = ee_take_and_register_file(task->ee, task->stdout);
+    if(fd < 0) {
+        printk(KERN_INFO "Unable to get fd for stdout\n");
+        fput(task->stderr);
+        fput(task->stdout);
+        return;
+    }
+    printk(KERN_INFO "stdout = %d\n", fd);
+
+    fd = ee_take_and_register_file(task->ee, task->stderr);
+    if(fd < 0) {
+        printk(KERN_INFO "Unable to get fd for stderr\n");
+        fput(task->stderr);
+        return;
+    }
+    printk(KERN_INFO "stderr = %d\n", fd);
+
     if(task->req->param_count != 0) {
         printk(KERN_INFO "invalid param count\n");
     } else {
@@ -254,10 +286,31 @@ static ssize_t handle_wasm_run_code(struct file *f, void *arg) {
 
     task.ee = &sess->ee;
     task.req = &req;
+
+    task.stdin = fget_raw(0);
+    if(IS_ERR(task.stdin)) {
+        return PTR_ERR(task.stdin);
+    }
+
+    task.stdout = fget_raw(1);
+    if(IS_ERR(task.stdout)) {
+        fput(task.stdin);
+        return PTR_ERR(task.stdout);
+    }
+
+    task.stderr = fget_raw(2);
+    if(IS_ERR(task.stderr)) {
+        fput(task.stdout);
+        fput(task.stdin);
+        return PTR_ERR(task.stderr);
+    }
     sema_init(&task.sem, 0);
 
     runner_ts = kthread_create(code_runner, &task, "code_runner");
     if(!runner_ts || IS_ERR(runner_ts)) {
+        fput(task.stderr);
+        fput(task.stdout);
+        fput(task.stdin);
         printk(KERN_INFO "Unable to start code runner\n");
         return -EINVAL;
     }

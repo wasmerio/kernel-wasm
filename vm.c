@@ -23,6 +23,7 @@ static int resolve_import(const char *name, uint32_t param_count, struct executi
         return -EINVAL;
     } else {
         out->ctx = &ee->ctx;
+        printk(KERN_INFO "Resolve: %s -> %px\n", name, out->func);
         return 0;
     }
 }
@@ -227,6 +228,8 @@ int init_execution_engine(const struct load_code_request *request, struct execut
 }
 
 void destroy_execution_engine(struct execution_engine *ee) {
+    int i;
+
     _set_memory_rw((unsigned long) ee->stack_begin, STACK_GUARD_SIZE / 4096);
 
     vfree(ee->stack_backing);
@@ -239,6 +242,13 @@ void destroy_execution_engine(struct execution_engine *ee) {
     vfree(ee->code);
 
     release_module_resolver(&ee->resolver);
+
+    for(i = 0; i < ee->file_count; i++) {
+        if(ee->files[i].f) {
+            fput(ee->files[i].f);
+        }
+    }
+    kfree(ee->files);
 }
 
 uint64_t ee_call0(struct execution_engine *ee, uint32_t offset) {
@@ -246,3 +256,48 @@ uint64_t ee_call0(struct execution_engine *ee, uint32_t offset) {
     func f = (func) (ee->code + offset);
     return f(&ee->ctx);
 }
+
+struct file * ee_get_file(struct execution_engine *ee, int fd) {
+    if(fd >= ee->file_count || !ee->files[fd].f) {
+        return NULL;
+    }
+    return ee->files[fd].f;
+}
+EXPORT_SYMBOL(ee_get_file);
+
+int ee_deregister_file(struct execution_engine *ee, int fd) {
+    if(fd >= ee->file_count || !ee->files[fd].f) {
+        return -EINVAL;
+    }
+    fput(ee->files[fd].f);
+    ee->files[fd].f = NULL;
+    return 0;
+}
+EXPORT_SYMBOL(ee_deregister_file);
+
+int ee_take_and_register_file(struct execution_engine *ee, struct file *f) {
+    int i, new_cap;
+    struct file_entry *tmp;
+
+    for(i = 0; i < ee->file_count; i++) {
+        if(!ee->files[i].f) {
+            ee->files[i].f = f;
+            return i;
+        }
+    }
+
+    if(ee->file_count == ee->file_cap) {
+        new_cap = ee->file_cap * 2 + 1;
+        tmp = krealloc(ee->files, sizeof(struct file_entry) * new_cap, GFP_KERNEL);
+        if(!tmp) {
+            return -ENOMEM;
+        }
+        ee->files = tmp;
+        ee->file_cap = new_cap;
+    }
+
+    ee->files[ee->file_count].f = f;
+    ee->file_count++;
+    return ee->file_count - 1;
+}
+EXPORT_SYMBOL(ee_take_and_register_file);

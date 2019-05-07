@@ -4,6 +4,9 @@
 #include <linux/set_memory.h>
 #include <linux/kallsyms.h>
 #include <linux/uaccess.h>
+#include <linux/fs.h>
+#include <linux/file.h>
+#include <linux/slab.h>
 #include "kapi.h"
 
 #define MAX_CODE_SIZE (1048576 * 8)
@@ -60,6 +63,10 @@ struct imported_func {
     struct vmctx *ctx;
 };
 
+struct file_entry {
+    struct file *f;
+};
+
 struct execution_engine {
     struct vmctx ctx;
     struct local_memory local_memory_backing;
@@ -75,6 +82,10 @@ struct execution_engine {
     uint8_t *stack_begin;
     uint8_t *stack_end;
     uint8_t *stack_backing;
+
+    struct file_entry *files;
+    int file_count;
+    int file_cap;
 };
 
 // We are assuming that no concurrent access to a session would ever happen - is this true?
@@ -118,3 +129,6 @@ static inline void ee_make_code_x(struct execution_engine *ee) {
 int init_execution_engine(const struct load_code_request *request, struct execution_engine *ee);
 void destroy_execution_engine(struct execution_engine *ee);
 uint64_t ee_call0(struct execution_engine *ee, uint32_t offset);
+int ee_take_and_register_file(struct execution_engine *ee, struct file *f);
+int ee_deregister_file(struct execution_engine *ee, int fd);
+struct file * ee_get_file(struct execution_engine *ee, int fd);
