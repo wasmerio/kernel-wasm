@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/slab.h>
+#include <asm/cacheflush.h>
 #include "kapi.h"
 
 #define MAX_CODE_SIZE (1048576 * 8)
@@ -17,6 +18,8 @@
 #define MAX_TABLE_COUNT 1024
 #define STACK_SIZE (2 * 1048576)
 #define STACK_GUARD_SIZE 8192
+#define STATIC_MEMORY_SIZE (6144ul * 1048576ul)
+#define STATIC_MEMORY_AVAILABLE (1024ul * 1048576ul)
 
 struct local_memory;
 struct local_table;
@@ -82,6 +85,10 @@ struct execution_engine {
     uint8_t *stack_begin;
     uint8_t *stack_end;
     uint8_t *stack_backing;
+
+    struct vm_struct *static_memory_vm;
+    struct page **memory_pages;
+    int memory_page_count;
 
     struct file_entry *files;
     int file_count;

@@ -141,13 +141,16 @@ static ssize_t handle_wasm_load_code(struct file *f, void *arg) {
         goto fail;
     }
     printk(KERN_INFO
-        "Initialized execution engine %px, code = %px, global_backing = %px, global_ptr_backing = %px, code_size = %u, memory_size = %lu\n",
+        "Initialized execution engine %px, "
+        "code = %px, global_backing = %px, global_ptr_backing = %px, code_size = %u, memory_size = %lu, "
+        "static_memory_addr = %px\n",
         &sess->ee,
         sess->ee.code,
         sess->ee.local_global_backing,
         sess->ee.local_global_ptr_backing,
         sess->ee.code_len,
-        sess->ee.local_memory_backing.bound
+        sess->ee.local_memory_backing.bound,
+        sess->ee.static_memory_vm->addr
     );
 
     sess->ready = 1;

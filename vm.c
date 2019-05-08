@@ -2,12 +2,15 @@
 
 static int (*_set_memory_ro)(unsigned long addr, int numpages);
 static int (*_set_memory_rw)(unsigned long addr, int numpages);
+static int (*_map_kernel_range_noflush)(unsigned long addr, unsigned long size,
+			    pgprot_t prot, struct page **pages);
 
 int vm_init(void) {
     _set_memory_ro = (void *) kallsyms_lookup_name("set_memory_ro");
     _set_memory_rw = (void *) kallsyms_lookup_name("set_memory_rw");
-    if(!_set_memory_ro || !_set_memory_rw) {
-        printk(KERN_ALERT "unable to get address for set_memory_ro/rw\n");
+    _map_kernel_range_noflush = (void *) kallsyms_lookup_name("map_kernel_range_noflush");
+    if(!_set_memory_ro || !_set_memory_rw || !_map_kernel_range_noflush) {
+        printk(KERN_ALERT "unable to get address for internal symbol(s)\n");
         return -EINVAL;
     }
     return 0;
@@ -29,20 +32,48 @@ static int resolve_import(const char *name, uint32_t param_count, struct executi
 }
 
 static int32_t wasm_memory_grow(struct vmctx *ctx, size_t memory_index, uint32_t pages) {
-    uint8_t *new_memory;
     unsigned long old_size, delta;
+    int new_os_page_count;
+    int i, j;
+    struct execution_engine *ee = (void *) ctx;
 
     if(ctx->memories) {
         old_size = (*ctx->memories)->bound;
+        if(pages == 0) return old_size / 65536;
+
         delta = (unsigned long) pages * 65536;
-        new_memory = vmalloc(old_size + delta);
-        if(!new_memory) {
+        if(old_size + delta > STATIC_MEMORY_AVAILABLE) {
             return -1;
         }
-        memcpy(new_memory, (*ctx->memories)->base, old_size);
-        memset(new_memory + old_size, 0, delta);
-        vfree((*ctx->memories)->base);
-        (*ctx->memories)->base = new_memory;
+
+        new_os_page_count = ((unsigned long) (old_size + delta) / PAGE_SIZE);
+        for(i = ee->memory_page_count; i < new_os_page_count; i++) {
+            ee->memory_pages[i] = alloc_page(GFP_KERNEL);
+            if(!ee->memory_pages[i]) {
+                for(j = ee->memory_page_count; j < i; j++) {
+                    __free_page(ee->memory_pages[j]);
+                    ee->memory_pages[j] = NULL;
+                }
+                return -1;
+            }
+        }
+
+        if(_map_kernel_range_noflush(
+            (unsigned long) ee->static_memory_vm->addr + old_size,
+            delta,
+            PAGE_KERNEL,
+            &ee->memory_pages[ee->memory_page_count]
+        ) != delta / PAGE_SIZE) {
+            printk(KERN_INFO "FIXME: something might not be handled properly here (map_kernel_range_noflush failure)\n");
+            return -1;
+        }
+        flush_cache_vmap(
+            (unsigned long) ee->static_memory_vm->addr + old_size,
+            (unsigned long) ee->static_memory_vm->addr + old_size + delta
+        );
+
+        ee->memory_page_count = new_os_page_count;
+
         (*ctx->memories)->bound += delta;
         return old_size / 65536;
     } else {
@@ -60,6 +91,7 @@ int init_execution_engine(const struct load_code_request *request, struct execut
     int i;
     struct import_request import_req;
     struct table_entry_request table_entry_req;
+    int pages_allocated_without_mapping = 0;
 
     if(
         request->code_len == 0 ||
@@ -99,12 +131,43 @@ int init_execution_engine(const struct load_code_request *request, struct execut
     ee->code_len = request->code_len;
 
     if(request->memory && request->memory_len) {
-        ee->local_memory_ptr_backing = &ee->local_memory_backing;
-        ee->local_memory_backing.base = vmalloc(request->memory_len);
-        if(ee->local_memory_backing.base == NULL) {
+        ee->static_memory_vm = __get_vm_area(STATIC_MEMORY_SIZE, VM_MAP, VMALLOC_START, VMALLOC_END);
+        if(!ee->static_memory_vm) {
             err = -ENOMEM;
             goto fail;
         }
+
+        ee->memory_page_count = (request->memory_len / PAGE_SIZE);
+        ee->memory_pages = vzalloc(sizeof(struct page *) * (STATIC_MEMORY_AVAILABLE / PAGE_SIZE));
+        if(!ee->memory_pages) {
+            err = -ENOMEM;
+            goto fail;
+        }
+        for(i = 0; i < ee->memory_page_count; i++) {
+            ee->memory_pages[i] = alloc_page(GFP_KERNEL);
+            if(!ee->memory_pages[i]) {
+                ee->memory_page_count = i;
+                pages_allocated_without_mapping = 1;
+                err = -ENOMEM;
+                goto fail;
+            }
+        }
+        if(_map_kernel_range_noflush(
+            (unsigned long) ee->static_memory_vm->addr,
+            request->memory_len,
+            PAGE_KERNEL,
+            ee->memory_pages
+        ) != ee->memory_page_count) {
+            printk(KERN_INFO "FIXME: something might not be handled properly here (map_kernel_range_noflush failure)\n");
+            err = -ENOMEM;
+            goto fail;
+        }
+        flush_cache_vmap(
+            (unsigned long) ee->static_memory_vm->addr,
+            (unsigned long) ee->static_memory_vm->addr + request->memory_len
+        );
+        ee->local_memory_ptr_backing = &ee->local_memory_backing;
+        ee->local_memory_backing.base = ee->static_memory_vm->addr;
         if(copy_from_user(ee->local_memory_backing.base, request->memory, request->memory_len)) {
             err = -EFAULT;
             goto fail;
@@ -213,13 +276,26 @@ int init_execution_engine(const struct load_code_request *request, struct execut
     return 0;
 
     fail:
+
+    if(ee->memory_pages) {
+        if(!pages_allocated_without_mapping) {
+            unmap_kernel_range(
+                (unsigned long) ee->static_memory_vm->addr,
+                ee->memory_page_count * PAGE_SIZE
+            );
+        }
+        for(i = 0; i < ee->memory_page_count; i++) {
+            __free_page(ee->memory_pages[i]);
+        }
+        vfree(ee->memory_pages);
+    }
+    if(ee->static_memory_vm) free_vm_area(ee->static_memory_vm);
     vfree(ee->stack_backing);
     vfree(ee->local_table_backing.base);
     vfree(ee->ctx.dynamic_sigindices);
     vfree(ee->ctx.imported_funcs);
     vfree(ee->local_global_backing);
     vfree(ee->local_global_ptr_backing);
-    vfree(ee->local_memory_backing.base);
     vfree(ee->code);
 
     release_module_resolver(&ee->resolver);
@@ -232,13 +308,23 @@ void destroy_execution_engine(struct execution_engine *ee) {
 
     _set_memory_rw((unsigned long) ee->stack_begin, STACK_GUARD_SIZE / 4096);
 
+    if(ee->memory_pages) {
+        unmap_kernel_range(
+            (unsigned long) ee->static_memory_vm->addr,
+            ee->memory_page_count * PAGE_SIZE
+        );
+        for(i = 0; i < ee->memory_page_count; i++) {
+            __free_page(ee->memory_pages[i]);
+        }
+        vfree(ee->memory_pages);
+    }
+    if(ee->static_memory_vm) free_vm_area(ee->static_memory_vm);
     vfree(ee->stack_backing);
     vfree(ee->local_table_backing.base);
     vfree(ee->ctx.dynamic_sigindices);
     vfree(ee->ctx.imported_funcs);
     vfree(ee->local_global_backing);
     vfree(ee->local_global_ptr_backing);
-    vfree(ee->local_memory_backing.base);
     vfree(ee->code);
 
     release_module_resolver(&ee->resolver);
