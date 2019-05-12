@@ -64,7 +64,7 @@ void kwasm_resolver_deregister(struct import_resolver *resolver) {
 }
 EXPORT_SYMBOL(kwasm_resolver_deregister);
 
-int get_module_resolver(struct module_resolver *out) {
+int get_module_resolver(struct execution_engine *ee, struct module_resolver *out) {
     int i;
     int err;
     struct resolver_entry *entry;
@@ -81,7 +81,7 @@ int get_module_resolver(struct module_resolver *out) {
     list_for_each(x, &global_registry.resolvers) {
         entry = container_of(x, struct resolver_entry, list);
         memset(&out->resolvers[i], 0, sizeof(out->resolvers[i]));
-        err = entry->inner.get_instance(&entry->inner, &out->resolvers[i]);
+        err = entry->inner.get_instance(ee, &entry->inner, &out->resolvers[i]);
         if(err) {
             kfree(out->resolvers);
             out->resolvers = NULL;

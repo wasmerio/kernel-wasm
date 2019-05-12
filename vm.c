@@ -1,4 +1,5 @@
 #include "vm.h"
+#include <linux/delay.h>
 
 static int (*_set_memory_ro)(unsigned long addr, int numpages);
 static int (*_set_memory_rw)(unsigned long addr, int numpages);
@@ -26,7 +27,7 @@ static int resolve_import(const char *name, uint32_t param_count, struct executi
         return -EINVAL;
     } else {
         out->ctx = &ee->ctx;
-        printk(KERN_INFO "Resolve: %s -> %px\n", name, out->func);
+        //printk(KERN_INFO "Resolve: %s -> %px\n", name, out->func);
         return 0;
     }
 }
@@ -107,7 +108,7 @@ int init_execution_engine(const struct load_code_request *request, struct execut
 
     memset(ee, 0, sizeof(struct execution_engine));
 
-    err = get_module_resolver(&ee->resolver);
+    err = get_module_resolver(ee, &ee->resolver);
     if(err) {
         return err;
     }
@@ -261,6 +262,12 @@ int init_execution_engine(const struct load_code_request *request, struct execut
     ee->intrinsics_backing.memory_grow = wasm_memory_grow;
     ee->intrinsics_backing.memory_size = wasm_memory_size;
 
+    ee->notifier = new_task_event_notifier();
+    if(!ee->notifier) {
+        err = -ENOMEM;
+        goto fail;
+    }
+
     ee->stack_backing = vmalloc(STACK_SIZE);
     if(!ee->stack_backing) {
         err = -ENOMEM;
@@ -276,6 +283,8 @@ int init_execution_engine(const struct load_code_request *request, struct execut
     return 0;
 
     fail:
+
+    if(ee->notifier) put_task_event_notifier(ee->notifier);
 
     if(ee->memory_pages) {
         if(!pages_allocated_without_mapping) {
@@ -305,6 +314,27 @@ int init_execution_engine(const struct load_code_request *request, struct execut
 
 void destroy_execution_engine(struct execution_engine *ee) {
     int i;
+    int wait_time_ms = 20;
+
+    for(i = 0; i < ee->file_count; i++) {
+        if(ee->files[i].f) {
+            fput(ee->files[i].f);
+        }
+    }
+    kfree(ee->files);
+
+    if(ee->notifier) {
+        // Wait for all routines using notifier to finish.
+        // FIXME: DoS attack?
+        while(atomic_read(&ee->notifier->refcount) != 1) {
+            printk(KERN_INFO "Waiting %d milliseconds for notifier drop\n", wait_time_ms);
+            msleep(wait_time_ms);
+            if(wait_time_ms < 1000) {
+                wait_time_ms *= 2;
+            }
+        }
+        put_task_event_notifier(ee->notifier);
+    }
 
     _set_memory_rw((unsigned long) ee->stack_begin, STACK_GUARD_SIZE / 4096);
 
@@ -328,13 +358,6 @@ void destroy_execution_engine(struct execution_engine *ee) {
     vfree(ee->code);
 
     release_module_resolver(&ee->resolver);
-
-    for(i = 0; i < ee->file_count; i++) {
-        if(ee->files[i].f) {
-            fput(ee->files[i].f);
-        }
-    }
-    kfree(ee->files);
 }
 
 uint64_t ee_call0(struct execution_engine *ee, uint32_t offset) {

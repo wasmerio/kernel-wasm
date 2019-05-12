@@ -150,7 +150,7 @@ static ssize_t handle_wasm_load_code(struct file *f, void *arg) {
         sess->ee.local_global_ptr_backing,
         sess->ee.code_len,
         sess->ee.local_memory_backing.bound,
-        sess->ee.static_memory_vm->addr
+        sess->ee.static_memory_vm ? sess->ee.static_memory_vm->addr : NULL
     );
 
     sess->ready = 1;
@@ -161,10 +161,13 @@ static ssize_t handle_wasm_load_code(struct file *f, void *arg) {
 }
 
 struct code_runner_task {
-    struct semaphore sem;
+    struct semaphore exec_start, finalizer_start, finalizer_end;
     struct execution_engine *ee;
     struct run_code_request *req;
     uint64_t ret;
+    int finalize_ret;
+    struct task_struct *runner_ts;
+    int finalizer_should_not_run;
 
     struct file *stdin, *stdout, *stderr;
 };
@@ -173,7 +176,7 @@ void code_runner_inner(struct Coroutine *co) {
     int fd;
 
     struct code_runner_task *task = co->private_data;
-    up(&task->sem);
+    up(&task->exec_start);
 
     fd = ee_take_and_register_file(task->ee, task->stdin);
     if(fd < 0) {
@@ -183,7 +186,7 @@ void code_runner_inner(struct Coroutine *co) {
         fput(task->stdin);
         return;
     }
-    printk(KERN_INFO "stdin = %d\n", fd);
+    //printk(KERN_INFO "stdin = %d\n", fd);
 
     fd = ee_take_and_register_file(task->ee, task->stdout);
     if(fd < 0) {
@@ -192,7 +195,7 @@ void code_runner_inner(struct Coroutine *co) {
         fput(task->stdout);
         return;
     }
-    printk(KERN_INFO "stdout = %d\n", fd);
+    //printk(KERN_INFO "stdout = %d\n", fd);
 
     fd = ee_take_and_register_file(task->ee, task->stderr);
     if(fd < 0) {
@@ -200,13 +203,13 @@ void code_runner_inner(struct Coroutine *co) {
         fput(task->stderr);
         return;
     }
-    printk(KERN_INFO "stderr = %d\n", fd);
+    //printk(KERN_INFO "stderr = %d\n", fd);
 
     if(task->req->param_count != 0) {
         printk(KERN_INFO "invalid param count\n");
     } else {
+        allow_signal(SIGKILL);
         task->ret = ee_call0(task->ee, task->req->entry_offset);
-        up(&task->sem);
     }
 }
 
@@ -218,11 +221,23 @@ static int code_runner(void *data) {
         .terminated = 0,
         .private_data = task,
     };
-    printk(KERN_INFO "stack: %px-%px\n", task->ee->stack_begin, task->ee->stack_end);
+    //printk(KERN_INFO "stack: %px-%px\n", task->ee->stack_begin, task->ee->stack_end);
     start_coroutine(&co);
     while(!co.terminated) {
         co_switch(&co.stack);
     }
+    return 0;
+}
+
+static int task_finalizer(void *data) {
+    struct code_runner_task *task = data;
+    down(&task->finalizer_start);
+    if(task->finalizer_should_not_run) {
+        return 0;
+    }
+
+    task->finalize_ret = kthread_stop(task->runner_ts);
+    up(&task->finalizer_end);
     return 0;
 }
 
@@ -276,7 +291,7 @@ static ssize_t handle_wasm_run_code(struct file *f, void *arg) {
     struct run_code_request req;
     struct code_runner_task task;
     struct privileged_session *sess = f->private_data;
-    struct task_struct *runner_ts;
+    struct task_struct *runner_ts, *finalizer_ts;
     struct run_code_result result;
 
     if(copy_from_user(&req, arg, sizeof(struct run_code_request))) {
@@ -286,6 +301,8 @@ static ssize_t handle_wasm_run_code(struct file *f, void *arg) {
     if(!sess->ready) {
         return -EINVAL;
     }
+
+    memset(&task, 0, sizeof(struct code_runner_task));
 
     task.ee = &sess->ee;
     task.req = &req;
@@ -307,10 +324,23 @@ static ssize_t handle_wasm_run_code(struct file *f, void *arg) {
         fput(task.stdin);
         return PTR_ERR(task.stderr);
     }
-    sema_init(&task.sem, 0);
+    sema_init(&task.exec_start, 0);
+    sema_init(&task.finalizer_start, 0);
+    sema_init(&task.finalizer_end, 0);
+
+    finalizer_ts = kthread_run(task_finalizer, &task, "task_finalizer");
+    if(!finalizer_ts || IS_ERR(finalizer_ts)) {
+        fput(task.stderr);
+        fput(task.stdout);
+        fput(task.stdin);
+        printk(KERN_INFO "Unable to start task finalizer\n");
+        return -EINVAL;
+    }
 
     runner_ts = kthread_create(code_runner, &task, "code_runner");
     if(!runner_ts || IS_ERR(runner_ts)) {
+        task.finalizer_should_not_run = 1;
+        up(&task.finalizer_start);
         fput(task.stderr);
         fput(task.stdout);
         fput(task.stdin);
@@ -318,29 +348,30 @@ static ssize_t handle_wasm_run_code(struct file *f, void *arg) {
         return -EINVAL;
     }
     get_task_struct(runner_ts);
+    task.runner_ts = runner_ts;
     wake_up_process(runner_ts);
 
-    down(&task.sem); // wait for execution start
+    down(&task.exec_start); // wait for execution start
+    up(&task.finalizer_start);
 
-    if(down_interruptible(&task.sem) < 0) { // wait for execution end
+    while(down_interruptible(&task.finalizer_end) < 0) {
         // interrupted by signal
         ee_make_code_nx(&sess->ee); // trigger a page fault
         made_nx = 1;
+        kill_pid(task_pid(runner_ts), SIGKILL, 0);
     }
-
-    ret = kthread_stop(runner_ts); // FIXME: Is it correct to use kthread_stop in this way?
+    ret = task.finalize_ret;
     if(ret != 0) {
         printk(KERN_INFO "bad result from runner thread: %d\n", ret);
         result.success = 0;
         result.retval = 0;
     } else {
-        printk(KERN_INFO "result = %llu\n", task.ret);
+        //printk(KERN_INFO "result = %llu\n", task.ret);
         result.success = 1;
         result.retval = task.ret;
     }
 
     put_task_struct(runner_ts);
-    while(down_trylock(&task.sem) == 0); // address the race condition in forceful termination
     if(made_nx) {
         ee_make_code_x(&sess->ee);
     }
