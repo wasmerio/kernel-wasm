@@ -178,7 +178,15 @@ void code_runner_inner(struct Coroutine *co) {
     struct code_runner_task *task = co->private_data;
     up(&task->exec_start);
 
-    fd = ee_take_and_register_file(task->ee, task->stdin);
+    if(vm_unshare_executor_files() < 0) {
+        printk(KERN_INFO "Unable to unshare files\n");
+        fput(task->stderr);
+        fput(task->stdout);
+        fput(task->stdin);
+        return;
+    }
+
+    fd = get_unused_fd_flags(O_RDWR);
     if(fd < 0) {
         printk(KERN_INFO "Unable to get fd for stdin\n");
         fput(task->stderr);
@@ -186,24 +194,27 @@ void code_runner_inner(struct Coroutine *co) {
         fput(task->stdin);
         return;
     }
-    //printk(KERN_INFO "stdin = %d\n", fd);
+    fd_install(fd, task->stdin);
+    printk(KERN_INFO "stdin = %d\n", fd);
 
-    fd = ee_take_and_register_file(task->ee, task->stdout);
+    fd = get_unused_fd_flags(O_RDWR);
     if(fd < 0) {
         printk(KERN_INFO "Unable to get fd for stdout\n");
         fput(task->stderr);
         fput(task->stdout);
         return;
     }
-    //printk(KERN_INFO "stdout = %d\n", fd);
+    fd_install(fd, task->stdout);
+    printk(KERN_INFO "stdout = %d\n", fd);
 
-    fd = ee_take_and_register_file(task->ee, task->stderr);
+    fd = get_unused_fd_flags(O_RDWR);
     if(fd < 0) {
         printk(KERN_INFO "Unable to get fd for stderr\n");
         fput(task->stderr);
         return;
     }
-    //printk(KERN_INFO "stderr = %d\n", fd);
+    fd_install(fd, task->stderr);
+    printk(KERN_INFO "stderr = %d\n", fd);
 
     if(task->req->param_count != 0) {
         printk(KERN_INFO "invalid param count\n");

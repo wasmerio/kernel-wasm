@@ -1,6 +1,7 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/fdtable.h>
 #include "../kapi.h"
 #include "../vm.h"
 #include "def.h"
@@ -43,7 +44,6 @@ int __wasi_fd_prestat_get(
     __wasi_fd_t fd,
     wasm_pointer_t _out
 ) {
-    struct execution_engine *ee = (void *) ctx;
     struct file *f;
     __wasi_prestat_t *out;
 
@@ -53,7 +53,7 @@ int __wasi_fd_prestat_get(
         return __WASI_EFAULT;
     }
 
-    f = ee_get_file(ee, fd);
+    f = fget(fd);
     if(!f) {
         return __WASI_EBADF;
     }
@@ -159,9 +159,12 @@ int __wasi_args_sizes_get(
     return __WASI_ESUCCESS;
 }
 
+extern int sys_close(unsigned int fd);
 int __wasi_fd_close(struct vmctx *ctx, __wasi_fd_t fd) {
-    struct execution_engine *ee = (void *) ctx;
-    if(ee_deregister_file(ee, fd) < 0) return __WASI_EBADF;
+    int ret;
+    //ret = __close_fd(current->files, fd);
+    ret = sys_close(fd);
+    if(ret < 0) return __WASI_EBADF;
     return __WASI_ESUCCESS;
 }
 
@@ -182,7 +185,6 @@ int __wasi_fd_write(
     uint32_t iovs_len,
     wasm_pointer_t nwritten
 ) {
-    struct execution_engine *ee = (void *) ctx;
     int ret;
     uint32_t i;
     __wasi_ciovec_t *iov;
@@ -197,7 +199,7 @@ int __wasi_fd_write(
     }
     *nwritten_p = 0;
 
-    f = ee_get_file(ee, fd);
+    f = fget(fd);
     if(!f) {
         return __WASI_EBADF;
     }
@@ -205,21 +207,25 @@ int __wasi_fd_write(
     for(i = 0; i < iovs_len; i++) {
         iov = (void *) vmctx_get_memory_slice(ctx, iovs + sizeof(__wasi_ciovec_t) * i, sizeof(__wasi_ciovec_t));
         if(!iov) {
+            fput(f);
             return __WASI_EFAULT;
         }
         buf = (void *) vmctx_get_memory_slice(ctx, iov->buf, iov->buf_len);
         if(!buf) {
+            fput(f);
             return __WASI_EFAULT;
         }
         pos = file_pos_read(f);
         ret = kernel_write(f, buf, iov->buf_len, &pos);
         if(ret < 0) {
+            fput(f);
             return __WASI_EPIPE;
         }
         *nwritten_p += ret;
         file_pos_write(f, pos);
     }
 
+    fput(f);
     return 0;
 }
 
@@ -230,7 +236,6 @@ int __wasi_fd_read(
     uint32_t iovs_len,
     wasm_pointer_t nread
 ) {
-    struct execution_engine *ee = (void *) ctx;
     int ret;
     uint32_t i;
     __wasi_ciovec_t *iov;
@@ -245,7 +250,7 @@ int __wasi_fd_read(
     }
     *nread_p = 0;
 
-    f = ee_get_file(ee, fd);
+    f = fget(fd);
     if(!f) {
         return __WASI_EBADF;
     }
@@ -253,21 +258,25 @@ int __wasi_fd_read(
     for(i = 0; i < iovs_len; i++) {
         iov = (void *) vmctx_get_memory_slice(ctx, iovs + sizeof(__wasi_ciovec_t) * i, sizeof(__wasi_ciovec_t));
         if(!iov) {
+            fput(f);
             return __WASI_EFAULT;
         }
         buf = (void *) vmctx_get_memory_slice(ctx, iov->buf, iov->buf_len);
         if(!buf) {
+            fput(f);
             return __WASI_EFAULT;
         }
         pos = file_pos_read(f);
         ret = kernel_read(f, buf, iov->buf_len, &pos);
         if(ret < 0) {
+            fput(f);
             return __WASI_EPIPE;
         }
         *nread_p += ret;
         file_pos_write(f, pos);
     }
 
+    fput(f);
     return 0;
 }
 
@@ -397,16 +406,17 @@ int __wasi_async_fd_read_async(
     buf_p = vmctx_get_memory_slice(ctx, buf, buf_len);
     if(!buf_p) return __WASI_EFAULT;
 
-    file = ee_get_file(ee, fd);
+    file = fget(fd);
     if(!file) return __WASI_EBADF;
 
     work = kmalloc(sizeof(struct wasi_work), GFP_KERNEL);
-    if(!work) return __WASI_ENOMEM;
+    if(!work) {
+        fput(file);
+        return __WASI_ENOMEM;
+    }
 
     work->notifier = ee->notifier;
     get_task_event_notifier(work->notifier);
-
-    atomic_long_inc(&file->f_count);
 
     work->result = -1;
     work->private_data = private_data;

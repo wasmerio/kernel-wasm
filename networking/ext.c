@@ -16,7 +16,6 @@ int __net_socket(
     int type,
     int proto
 ) {
-    struct execution_engine *ee = (void *) ctx;
     struct socket *sock;
     struct file *f;
     int err, fd;
@@ -30,17 +29,20 @@ int __net_socket(
     )) < 0) {
         return err;
     }
+
+    fd = get_unused_fd_flags(O_RDWR);
+    if(fd < 0) {
+        return fd;
+    }
+
     f = sock_alloc_file(sock, O_RDWR, NULL);
     if(IS_ERR(f)) {
+        put_unused_fd(fd);
         sock_release(sock);
         return PTR_ERR(f);
     }
 
-    if((fd = ee_take_and_register_file(ee, f)) < 0) {
-        fput(f);
-        return fd;
-    }
-
+    fd_install(fd, f);
     return fd;
 }
 
@@ -50,31 +52,39 @@ int __net_bind(
     wasm_pointer_t sockaddr,
     uint32_t sockaddr_len
 ) {
-    struct execution_engine *ee = (void *) ctx;
     int err;
     struct file *file;
     struct socket *sock;
     struct sockaddr *sa;
 
-    file = ee_get_file(ee, fd);
+    file = fget(fd);
     if(!file) {
         return -EBADF;
     }
 
     sock = sock_from_file(file, &err);
     if(!sock) {
+        fput(file);
         return -ENOTSOCK;
     }
 
     if(sockaddr) {
         sa = (void *) vmctx_get_memory_slice(ctx, sockaddr, sockaddr_len);
-        if(!sa) return -EFAULT;
+        if(!sa) {
+            fput(file);
+            return -EFAULT;
+        }
     } else {
-        if(sockaddr_len != 0) return -EINVAL;
+        if(sockaddr_len != 0) {
+            fput(file);
+            return -EINVAL;
+        }
         sa = NULL;
     }
 
-    return sock->ops->bind(sock, sa, sockaddr_len);
+    err = sock->ops->bind(sock, sa, sockaddr_len);
+    fput(file);
+    return err;
 }
 
 int __net_listen(
@@ -82,22 +92,24 @@ int __net_listen(
     int fd,
     int backlog
 ) {
-    struct execution_engine *ee = (void *) ctx;
     int err;
     struct file *file;
     struct socket *sock;
 
-    file = ee_get_file(ee, fd);
+    file = fget(fd);
     if(!file) {
         return -EBADF;
     }
 
     sock = sock_from_file(file, &err);
     if(!sock) {
+        fput(file);
         return -ENOTSOCK;
     }
 
-    return sock->ops->listen(sock, backlog);
+    err = sock->ops->listen(sock, backlog);
+    fput(file);
+    return err;
 }
 
 int __net_accept(
@@ -106,34 +118,41 @@ int __net_accept(
     wasm_pointer_t sockaddr,
     wasm_pointer_t sockaddr_len_vptr
 ) {
-    struct execution_engine *ee = (void *) ctx;
     int err, new_fd;
     struct file *file, *new_file;
     struct socket *sock, *new_sock;
     struct sockaddr *sa;
     int *sockaddr_len_p;
 
-    file = ee_get_file(ee, fd);
+    file = fget(fd);
     if(!file) {
         return -EBADF;
     }
 
     sock = sock_from_file(file, &err);
     if(!sock) {
+        fput(file);
         return -ENOTSOCK;
     }
 
     if(sockaddr) {
         sockaddr_len_p = (void *) vmctx_get_memory_slice(ctx, sockaddr_len_vptr, sizeof(int));
-        if(!sockaddr_len_p) return -EFAULT;
+        if(!sockaddr_len_p) {
+            fput(file);
+            return -EFAULT;
+        }
 
         sa = (void *) vmctx_get_memory_slice(ctx, sockaddr, *sockaddr_len_p);
-        if(!sa) return -EFAULT;
+        if(!sa) {
+            fput(file);
+            return -EFAULT;
+        }
     } else {
         sa = NULL;
     }
 
     if((err = sock_create_lite(AF_INET, SOCK_STREAM, 0, &new_sock)) < 0) {
+        fput(file);
         return err;
     }
 
@@ -141,8 +160,11 @@ int __net_accept(
 
     if((err = sock->ops->accept(sock, new_sock, 0, 1)) < 0) {
         sock_release(new_sock);
+        fput(file);
         return err;
     }
+
+    fput(file);
 
     if(sa) {
         if((err = new_sock->ops->getname(new_sock, sa, sockaddr_len_p, 2)) < 0) {
@@ -157,12 +179,12 @@ int __net_accept(
         return PTR_ERR(new_file);
     }
 
-    if((new_fd = ee_take_and_register_file(ee, new_file)) < 0) {
+    new_fd = get_unused_fd_flags(O_RDWR);
+    if(new_fd < 0) {
         fput(new_file);
-        sock_release(new_sock);
         return new_fd;
     }
-
+    fd_install(new_fd, new_file);
     return new_fd;
 }
 

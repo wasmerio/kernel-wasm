@@ -5,12 +5,28 @@ static int (*_set_memory_ro)(unsigned long addr, int numpages);
 static int (*_set_memory_rw)(unsigned long addr, int numpages);
 static int (*_map_kernel_range_noflush)(unsigned long addr, unsigned long size,
 			    pgprot_t prot, struct page **pages);
+static void (*_put_files_struct)(struct files_struct *files);
+static int (*_unshare_files)(struct files_struct **displaced);
+
+int vm_unshare_executor_files(void) {
+    struct files_struct *displaced = NULL;
+    int ret;
+    
+    ret = _unshare_files(&displaced);
+    if(ret < 0) {
+        return ret;
+    }
+    if(displaced) _put_files_struct(displaced);
+    return 0;
+}
 
 int vm_init(void) {
     _set_memory_ro = (void *) kallsyms_lookup_name("set_memory_ro");
     _set_memory_rw = (void *) kallsyms_lookup_name("set_memory_rw");
     _map_kernel_range_noflush = (void *) kallsyms_lookup_name("map_kernel_range_noflush");
-    if(!_set_memory_ro || !_set_memory_rw || !_map_kernel_range_noflush) {
+    _unshare_files = (void *) kallsyms_lookup_name("unshare_files");
+    _put_files_struct = (void *) kallsyms_lookup_name("put_files_struct");
+    if(!_set_memory_ro || !_set_memory_rw || !_map_kernel_range_noflush || !_unshare_files || !_put_files_struct) {
         printk(KERN_ALERT "unable to get address for internal symbol(s)\n");
         return -EINVAL;
     }
@@ -316,13 +332,6 @@ void destroy_execution_engine(struct execution_engine *ee) {
     int i;
     int wait_time_ms = 20;
 
-    for(i = 0; i < ee->file_count; i++) {
-        if(ee->files[i].f) {
-            fput(ee->files[i].f);
-        }
-    }
-    kfree(ee->files);
-
     if(ee->notifier) {
         // Wait for all routines using notifier to finish.
         // FIXME: DoS attack?
@@ -365,48 +374,3 @@ uint64_t ee_call0(struct execution_engine *ee, uint32_t offset) {
     func f = (func) (ee->code + offset);
     return f(&ee->ctx);
 }
-
-struct file * ee_get_file(struct execution_engine *ee, int fd) {
-    if(fd >= ee->file_count || !ee->files[fd].f) {
-        return NULL;
-    }
-    return ee->files[fd].f;
-}
-EXPORT_SYMBOL(ee_get_file);
-
-int ee_deregister_file(struct execution_engine *ee, int fd) {
-    if(fd >= ee->file_count || !ee->files[fd].f) {
-        return -EINVAL;
-    }
-    fput(ee->files[fd].f);
-    ee->files[fd].f = NULL;
-    return 0;
-}
-EXPORT_SYMBOL(ee_deregister_file);
-
-int ee_take_and_register_file(struct execution_engine *ee, struct file *f) {
-    int i, new_cap;
-    struct file_entry *tmp;
-
-    for(i = 0; i < ee->file_count; i++) {
-        if(!ee->files[i].f) {
-            ee->files[i].f = f;
-            return i;
-        }
-    }
-
-    if(ee->file_count == ee->file_cap) {
-        new_cap = ee->file_cap * 2 + 1;
-        tmp = krealloc(ee->files, sizeof(struct file_entry) * new_cap, GFP_KERNEL);
-        if(!tmp) {
-            return -ENOMEM;
-        }
-        ee->files = tmp;
-        ee->file_cap = new_cap;
-    }
-
-    ee->files[ee->file_count].f = f;
-    ee->file_count++;
-    return ee->file_count - 1;
-}
-EXPORT_SYMBOL(ee_take_and_register_file);

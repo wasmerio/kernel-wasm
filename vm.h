@@ -67,10 +67,6 @@ struct imported_func {
     struct vmctx *ctx;
 };
 
-struct file_entry {
-    struct file *f;
-};
-
 struct execution_engine {
     struct vmctx ctx;
     struct local_memory local_memory_backing;
@@ -90,10 +86,6 @@ struct execution_engine {
     struct vm_struct *static_memory_vm;
     struct page **memory_pages;
     int memory_page_count;
-
-    struct file_entry *files;
-    int file_count;
-    int file_cap;
 
     struct task_event_notifier *notifier;
 };
@@ -136,9 +128,7 @@ static inline void ee_make_code_x(struct execution_engine *ee) {
     set_memory_x((unsigned long) ee->code, round_up_to_page_size(ee->code_len) / 4096);
 }
 
+int vm_unshare_executor_files(void);
 int init_execution_engine(const struct load_code_request *request, struct execution_engine *ee);
 void destroy_execution_engine(struct execution_engine *ee);
 uint64_t ee_call0(struct execution_engine *ee, uint32_t offset);
-int ee_take_and_register_file(struct execution_engine *ee, struct file *f);
-int ee_deregister_file(struct execution_engine *ee, int fd);
-struct file * ee_get_file(struct execution_engine *ee, int fd);
