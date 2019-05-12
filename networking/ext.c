@@ -3,12 +3,19 @@
 #include <linux/file.h>
 #include <linux/net.h>
 #include <linux/nsproxy.h>
+#include <linux/kallsyms.h>
+#include <uapi/linux/eventpoll.h>
 #include "../kapi.h"
 #include "../vm.h"
 
 typedef uint32_t wasm_pointer_t;
 
 struct import_resolver *resolver;
+
+static int (*_sys_epoll_create)(int size);
+static int (*_sys_epoll_ctl)(int epfd, int op, int fd, struct epoll_event *event);
+static int (*_sys_epoll_wait)(int epfd, struct epoll_event *events, int maxevents, int timeout);
+static int (*_sys_fcntl)(unsigned int fd, unsigned int cmd, unsigned long arg);
 
 int __net_socket(
     struct vmctx *ctx,
@@ -188,6 +195,73 @@ int __net_accept(
     return new_fd;
 }
 
+int __net_epoll_create(struct vmctx *ctx) {
+    return _sys_epoll_create(42);
+}
+int __net_epoll_ctl(
+    struct vmctx *ctx,
+    int epfd,
+    int op,
+    int fd,
+    wasm_pointer_t _event
+) {
+    struct epoll_event *event;
+    mm_segment_t old_fs;
+    int ret;
+
+    event = (void *) vmctx_get_memory_slice(ctx, _event, sizeof(struct epoll_event));
+    if(!event) return -EFAULT;
+
+    old_fs = get_fs();
+	set_fs(KERNEL_DS);
+    ret = _sys_epoll_ctl(epfd, op, fd, event);
+    set_fs(old_fs);
+
+    return ret;
+}
+int __net_epoll_wait(
+    struct vmctx *ctx,
+    int epfd,
+    wasm_pointer_t _events,
+    int maxevents,
+    int timeout
+) {
+    int ret;
+    struct epoll_event *events;
+    mm_segment_t old_fs;
+    events = (void *) vmctx_get_memory_slice(
+        ctx,
+        _events,
+        (unsigned long) sizeof(struct epoll_event) * (unsigned long) (unsigned int) maxevents
+    );
+    if(!events) return -EFAULT;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+    ret = _sys_epoll_wait(epfd, events, maxevents, timeout);
+	set_fs(old_fs);
+
+	return ret;
+}
+
+int __net_fcntl(
+    struct vmctx *ctx,
+    int fd,
+    int cmd,
+    uint32_t arg
+) {
+    switch(cmd) {
+        case F_GETFL:
+        case F_SETFL:
+            break;
+
+        default:
+            return -EPERM;
+    }
+
+    return _sys_fcntl(fd, cmd, arg);
+}
+
 int do_resolve(struct import_resolver_instance *self, const char *name, struct import_info *out) {
     if(strcmp(name, "net##_socket") == 0) {
         out->fn = __net_socket;
@@ -205,6 +279,22 @@ int do_resolve(struct import_resolver_instance *self, const char *name, struct i
         out->fn = __net_accept;
         out->param_count = 3;
         return 0;
+    } else if(strcmp(name, "net##_epoll_create") == 0) {
+        out->fn = __net_epoll_create;
+        out->param_count = 0;
+        return 0;
+    } else if(strcmp(name, "net##_epoll_ctl") == 0) {
+        out->fn = __net_epoll_ctl;
+        out->param_count = 4;
+        return 0;
+    } else if(strcmp(name, "net##_epoll_wait") == 0) {
+        out->fn = __net_epoll_ctl;
+        out->param_count = 4;
+        return 0;
+    } else if(strcmp(name, "net##_fcntl") == 0) {
+        out->fn = __net_fcntl;
+        out->param_count = 3;
+        return 0;
     } else {
         return -EINVAL;
     }
@@ -219,6 +309,21 @@ int __init init_module(void) {
     struct import_resolver tmp = {
         .get_instance = get_instance
     };
+
+    _sys_epoll_create = (void *) kallsyms_lookup_name("sys_epoll_create");
+    _sys_epoll_ctl = (void *) kallsyms_lookup_name("sys_epoll_ctl");
+    _sys_epoll_wait = (void *) kallsyms_lookup_name("sys_epoll_wait");
+    _sys_fcntl = (void *) kallsyms_lookup_name("sys_fcntl");
+    if(
+        !_sys_epoll_create ||
+        !_sys_epoll_ctl ||
+        !_sys_epoll_wait ||
+        !_sys_fcntl
+    ) {
+        printk(KERN_INFO "Unable to find some internal symbols.\n");
+        return -EINVAL;
+    }
+
     resolver = kwasm_resolver_register(&tmp);
     if(IS_ERR(resolver)) {
         return PTR_ERR(resolver);
