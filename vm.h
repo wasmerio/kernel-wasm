@@ -28,16 +28,18 @@ struct imported_func;
 struct vm_intrinsics;
 
 struct vmctx {
-    struct local_memory **memories;
+    struct local_memory **_memories;
     struct local_table **tables;
     uint64_t **globals;
-    void **imported_memories;
+    void **_imported_memories;
     void **imported_tables;
     void **imported_globals;
     struct imported_func *imported_funcs;
     uint32_t *dynamic_sigindices;
     struct vm_intrinsics *intrinsics;
     uint8_t *stack_lower_bound;
+    uint8_t *memory_base;
+    size_t memory_bound;
 };
 
 struct vm_intrinsics {
@@ -69,8 +71,6 @@ struct imported_func {
 
 struct execution_engine {
     struct vmctx ctx;
-    struct local_memory local_memory_backing;
-    struct local_memory *local_memory_ptr_backing;
     struct local_table local_table_backing;
     struct local_table *local_table_ptr_backing;
     struct vm_intrinsics intrinsics_backing;
@@ -105,16 +105,12 @@ static inline unsigned long round_up_to_page_size(unsigned long x) {
 }
 
 static inline uint8_t *vmctx_get_memory_slice(struct vmctx *ctx, uint32_t offset, uint32_t len) {
-    struct local_memory *mem;
     unsigned long begin, end, real_end;
 
-    if(ctx->memories == NULL) return NULL;
-    mem = *ctx->memories;
-
-    begin = (unsigned long) mem->base + (unsigned long) offset;
+    begin = (unsigned long) ctx->memory_base + (unsigned long) offset;
     end = begin + (unsigned long) len;
-    real_end = (unsigned long) mem->base + (unsigned long) mem->bound;
-    if(end < begin || begin < (unsigned long) mem->base || begin >= real_end || end > real_end) {
+    real_end = (unsigned long) ctx->memory_base + (unsigned long) ctx->memory_bound;
+    if(end < begin || begin < (unsigned long) ctx->memory_base || begin >= real_end || end > real_end) {
         return NULL;
     }
     return (uint8_t *) begin;

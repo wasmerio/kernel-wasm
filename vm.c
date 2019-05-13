@@ -54,12 +54,13 @@ static int32_t wasm_memory_grow(struct vmctx *ctx, size_t memory_index, uint32_t
     int i, j;
     struct execution_engine *ee = (void *) ctx;
 
-    if(ctx->memories) {
-        old_size = (*ctx->memories)->bound;
+    if(ctx->memory_base) {
+        old_size = ctx->memory_bound;
         if(pages == 0) return old_size / 65536;
 
         delta = (unsigned long) pages * 65536;
         if(old_size + delta > STATIC_MEMORY_AVAILABLE) {
+            printk(KERN_INFO "Rejected memory grow request (#1)\n");
             return -1;
         }
 
@@ -71,6 +72,7 @@ static int32_t wasm_memory_grow(struct vmctx *ctx, size_t memory_index, uint32_t
                     __free_page(ee->memory_pages[j]);
                     ee->memory_pages[j] = NULL;
                 }
+                printk(KERN_INFO "Rejected memory grow request (#2)\n");
                 return -1;
             }
         }
@@ -91,7 +93,7 @@ static int32_t wasm_memory_grow(struct vmctx *ctx, size_t memory_index, uint32_t
 
         ee->memory_page_count = new_os_page_count;
 
-        (*ctx->memories)->bound += delta;
+        ctx->memory_bound += delta;
         return old_size / 65536;
     } else {
         return -1;
@@ -99,7 +101,7 @@ static int32_t wasm_memory_grow(struct vmctx *ctx, size_t memory_index, uint32_t
 }
 
 static int32_t wasm_memory_size(struct vmctx *ctx, size_t memory_index) {
-    if(ctx->memories) return (*ctx->memories)->bound / 65536;
+    if(ctx->memory_base) return ctx->memory_bound / 65536;
     else return 0;
 }
 
@@ -183,14 +185,12 @@ int init_execution_engine(const struct load_code_request *request, struct execut
             (unsigned long) ee->static_memory_vm->addr,
             (unsigned long) ee->static_memory_vm->addr + request->memory_len
         );
-        ee->local_memory_ptr_backing = &ee->local_memory_backing;
-        ee->local_memory_backing.base = ee->static_memory_vm->addr;
-        if(copy_from_user(ee->local_memory_backing.base, request->memory, request->memory_len)) {
+        ee->ctx.memory_base = ee->static_memory_vm->addr;
+        if(copy_from_user(ee->ctx.memory_base, request->memory, request->memory_len)) {
             err = -EFAULT;
             goto fail;
         }
-        ee->local_memory_backing.bound = request->memory_len;
-        ee->ctx.memories = &ee->local_memory_ptr_backing;
+        ee->ctx.memory_bound = request->memory_len;
     }
     if(request->globals && request->global_count) {
         ee->local_global_ptr_backing = vmalloc(sizeof(uint64_t *) * request->global_count);

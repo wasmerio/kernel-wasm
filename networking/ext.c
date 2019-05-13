@@ -12,10 +12,28 @@ typedef uint32_t wasm_pointer_t;
 
 struct import_resolver *resolver;
 
+struct __timespec {
+	uint64_t       tv_sec;                 /* seconds */
+	long long               tv_nsec;                /* nanoseconds */
+};
+
+struct __itimerspec {
+	struct __timespec it_interval;    /* timer period */
+	struct __timespec it_value;       /* timer expiration */
+};
+
+extern int sys_close(unsigned int fd);
+
 static int (*_sys_epoll_create)(int size);
 static int (*_sys_epoll_ctl)(int epfd, int op, int fd, struct epoll_event *event);
 static int (*_sys_epoll_wait)(int epfd, struct epoll_event *events, int maxevents, int timeout);
 static int (*_sys_fcntl)(unsigned int fd, unsigned int cmd, unsigned long arg);
+static int (*_sys_accept4)(int fd, struct sockaddr *upeer_sockaddr, int *upeer_addrlen, int flags);
+static int (*_sys_sendto)(int fd, void *buff, size_t len, unsigned int flags, struct sockaddr *addr, int addr_len);
+static int (*_sys_recvfrom)(int fd, void *ubuf, size_t size, unsigned int flasgs, struct sockaddr *addr, int *addr_len);
+static int (*_sys_timerfd_create)(int clockid, int flags);
+static int (*_sys_timerfd_settime)(int ufd, int flags, const struct __itimerspec *utmr, struct __itimerspec *otmr);
+static int (*_sys_eventfd)(unsigned int count);
 
 int __net_socket(
     struct vmctx *ctx,
@@ -119,80 +137,118 @@ int __net_listen(
     return err;
 }
 
-int __net_accept(
+int __net_accept4(
     struct vmctx *ctx,
     int fd,
     wasm_pointer_t sockaddr,
-    wasm_pointer_t sockaddr_len_vptr
+    wasm_pointer_t sockaddr_len_vptr,
+    uint32_t flags
 ) {
-    int err, new_fd;
-    struct file *file, *new_file;
-    struct socket *sock, *new_sock;
-    struct sockaddr *sa;
-    int *sockaddr_len_p;
-
-    file = fget(fd);
-    if(!file) {
-        return -EBADF;
-    }
-
-    sock = sock_from_file(file, &err);
-    if(!sock) {
-        fput(file);
-        return -ENOTSOCK;
-    }
+    int ret;
+    struct sockaddr *sa = NULL;
+    int *sockaddr_len_p = NULL;
+    mm_segment_t old_fs;
 
     if(sockaddr) {
         sockaddr_len_p = (void *) vmctx_get_memory_slice(ctx, sockaddr_len_vptr, sizeof(int));
         if(!sockaddr_len_p) {
-            fput(file);
             return -EFAULT;
         }
 
         sa = (void *) vmctx_get_memory_slice(ctx, sockaddr, *sockaddr_len_p);
         if(!sa) {
-            fput(file);
             return -EFAULT;
         }
-    } else {
-        sa = NULL;
     }
 
-    if((err = sock_create_lite(AF_INET, SOCK_STREAM, 0, &new_sock)) < 0) {
-        fput(file);
-        return err;
+    old_fs = get_fs();
+	set_fs(KERNEL_DS);
+    ret = _sys_accept4(fd, sa, sockaddr_len_p, flags);
+    set_fs(old_fs);
+
+    return ret;
+}
+
+int __net_sendto(
+    struct vmctx *ctx,
+    int fd,
+    wasm_pointer_t buf,
+    uint32_t len,
+    uint32_t flags,
+    wasm_pointer_t addr,
+    int addr_len
+) {
+    int ret;
+    mm_segment_t old_fs;
+    struct sockaddr *sa = NULL;
+    uint8_t *buf_p = vmctx_get_memory_slice(ctx, buf, len);
+    if(!buf_p) return -EFAULT;
+
+    if(addr) {
+        sa = (void *) vmctx_get_memory_slice(ctx, addr, addr_len);
+        if(!sa) return -EFAULT;
     }
 
-    new_sock->ops = sock->ops;
+    old_fs = get_fs();
+	set_fs(KERNEL_DS);
+    ret = _sys_sendto(fd, buf_p, len, flags, sa, addr_len);
+    set_fs(old_fs);
 
-    if((err = sock->ops->accept(sock, new_sock, 0, 1)) < 0) {
-        sock_release(new_sock);
-        fput(file);
-        return err;
+    return ret;
+}
+
+int __net_recvfrom(
+    struct vmctx *ctx,
+    int fd,
+    wasm_pointer_t buf,
+    uint32_t len,
+    uint32_t flags,
+    wasm_pointer_t addr,
+    wasm_pointer_t addr_len_vptr
+) {
+    int ret;
+    mm_segment_t old_fs;
+    struct sockaddr *sa = NULL;
+    int *addr_len_p = NULL;
+    uint8_t *buf_p = vmctx_get_memory_slice(ctx, buf, len);
+
+    if(!buf_p) return -EFAULT;
+
+    if(addr) {
+        addr_len_p = (void *) vmctx_get_memory_slice(ctx, addr_len_vptr, sizeof(int));
+        if(!addr_len_p) return -EFAULT;
+
+        sa = (void *) vmctx_get_memory_slice(ctx, addr, *addr_len_p);
+        if(!sa) return -EFAULT;
     }
 
+    old_fs = get_fs();
+	set_fs(KERNEL_DS);
+    ret = _sys_recvfrom(fd, buf_p, len, flags, sa, addr_len_p);
+    set_fs(old_fs);
+
+    return ret;
+}
+
+int __net_get_immediate_fd(
+    struct vmctx *ctx
+) {
+    int fd, ret;
+    uint64_t value = 1;
+    loff_t pos = 0;
+    struct file *file;
+
+    fd = _sys_eventfd(0);
+    if(fd < 0) return fd;
+
+    file = fget(fd);
+    if(!file) return -EBADF;
+
+    ret = kernel_write(file, &value, sizeof(uint64_t), &pos);
     fput(file);
 
-    if(sa) {
-        if((err = new_sock->ops->getname(new_sock, sa, sockaddr_len_p, 2)) < 0) {
-            sock_release(new_sock);
-            return err;
-        }
-    }
-
-    new_file = sock_alloc_file(new_sock, O_RDWR, NULL);
-    if(IS_ERR(new_file)) {
-        sock_release(new_sock);
-        return PTR_ERR(new_file);
-    }
-
-    new_fd = get_unused_fd_flags(O_RDWR);
-    if(new_fd < 0) {
-        fput(new_file);
-        return new_fd;
-    }
-    fd_install(new_fd, new_file);
-    return new_fd;
+    if(ret < 0) return ret;
+    return fd;
 }
 
 int __net_epoll_create(struct vmctx *ctx) {
@@ -205,12 +261,14 @@ int __net_epoll_ctl(
     int fd,
     wasm_pointer_t _event
 ) {
-    struct epoll_event *event;
+    struct epoll_event *event = NULL;
     mm_segment_t old_fs;
     int ret;
 
-    event = (void *) vmctx_get_memory_slice(ctx, _event, sizeof(struct epoll_event));
-    if(!event) return -EFAULT;
+    if(_event) {
+        event = (void *) vmctx_get_memory_slice(ctx, _event, sizeof(struct epoll_event));
+        if(!event) return -EFAULT;
+    }
 
     old_fs = get_fs();
 	set_fs(KERNEL_DS);
@@ -275,9 +333,21 @@ int do_resolve(struct import_resolver_instance *self, const char *name, struct i
         out->fn = __net_listen;
         out->param_count = 2;
         return 0;
-    } else if(strcmp(name, "net##_accept") == 0) {
-        out->fn = __net_accept;
-        out->param_count = 3;
+    } else if(strcmp(name, "net##_accept4") == 0) {
+        out->fn = __net_accept4;
+        out->param_count = 4;
+        return 0;
+    } else if(strcmp(name, "net##_sendto") == 0) {
+        out->fn = __net_sendto;
+        out->param_count = 6;
+        return 0;
+    } else if(strcmp(name, "net##_recvfrom") == 0) {
+        out->fn = __net_recvfrom;
+        out->param_count = 6;
+        return 0;
+    } else if(strcmp(name, "net##_get_immediate_fd") == 0) {
+        out->fn = __net_get_immediate_fd;
+        out->param_count = 0;
         return 0;
     } else if(strcmp(name, "net##_epoll_create") == 0) {
         out->fn = __net_epoll_create;
@@ -288,7 +358,7 @@ int do_resolve(struct import_resolver_instance *self, const char *name, struct i
         out->param_count = 4;
         return 0;
     } else if(strcmp(name, "net##_epoll_wait") == 0) {
-        out->fn = __net_epoll_ctl;
+        out->fn = __net_epoll_wait;
         out->param_count = 4;
         return 0;
     } else if(strcmp(name, "net##_fcntl") == 0) {
@@ -314,11 +384,24 @@ int __init init_module(void) {
     _sys_epoll_ctl = (void *) kallsyms_lookup_name("sys_epoll_ctl");
     _sys_epoll_wait = (void *) kallsyms_lookup_name("sys_epoll_wait");
     _sys_fcntl = (void *) kallsyms_lookup_name("sys_fcntl");
+    _sys_accept4 = (void *) kallsyms_lookup_name("sys_accept4");
+    _sys_sendto = (void *) kallsyms_lookup_name("sys_sendto");
+    _sys_recvfrom = (void *) kallsyms_lookup_name("sys_recvfrom");
+    _sys_timerfd_create = (void *) kallsyms_lookup_name("sys_timerfd_create");
+    _sys_timerfd_settime = (void *) kallsyms_lookup_name("sys_timerfd_settime");
+    _sys_eventfd = (void *) kallsyms_lookup_name("sys_eventfd");
+
     if(
         !_sys_epoll_create ||
         !_sys_epoll_ctl ||
         !_sys_epoll_wait ||
-        !_sys_fcntl
+        !_sys_fcntl ||
+        !_sys_accept4 ||
+        !_sys_sendto ||
+        !_sys_recvfrom ||
+        !_sys_timerfd_create ||
+        !_sys_timerfd_settime ||
+        !_sys_eventfd
     ) {
         printk(KERN_INFO "Unable to find some internal symbols.\n");
         return -EINVAL;

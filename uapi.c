@@ -149,7 +149,7 @@ static ssize_t handle_wasm_load_code(struct file *f, void *arg) {
         sess->ee.local_global_backing,
         sess->ee.local_global_ptr_backing,
         sess->ee.code_len,
-        sess->ee.local_memory_backing.bound,
+        sess->ee.ctx.memory_bound,
         sess->ee.static_memory_vm ? sess->ee.static_memory_vm->addr : NULL
     );
 
