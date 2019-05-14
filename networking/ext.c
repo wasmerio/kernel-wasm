@@ -33,7 +33,7 @@ static int (*_sys_sendto)(int fd, void *buff, size_t len, unsigned int flags, st
 static int (*_sys_recvfrom)(int fd, void *ubuf, size_t size, unsigned int flasgs, struct sockaddr *addr, int *addr_len);
 static int (*_sys_timerfd_create)(int clockid, int flags);
 static int (*_sys_timerfd_settime)(int ufd, int flags, const struct __itimerspec *utmr, struct __itimerspec *otmr);
-static int (*_sys_eventfd)(unsigned int count);
+static int (*_sys_eventfd2)(unsigned int count, int flags);
 
 int __net_socket(
     struct vmctx *ctx,
@@ -230,25 +230,12 @@ int __net_recvfrom(
     return ret;
 }
 
-int __net_get_immediate_fd(
-    struct vmctx *ctx
+int __net_eventfd_sem(
+    struct vmctx *ctx,
+    uint32_t initial
 ) {
-    int fd, ret;
-    uint64_t value = 1;
-    loff_t pos = 0;
-    struct file *file;
-
-    fd = _sys_eventfd(0);
-    if(fd < 0) return fd;
-
-    file = fget(fd);
-    if(!file) return -EBADF;
-
-    ret = kernel_write(file, &value, sizeof(uint64_t), &pos);
-    fput(file);
-
-    if(ret < 0) return ret;
-    return fd;
+    const int EFD_SEMAPHORE = 1;
+    return _sys_eventfd2(initial, EFD_SEMAPHORE);
 }
 
 int __net_epoll_create(struct vmctx *ctx) {
@@ -345,9 +332,9 @@ int do_resolve(struct import_resolver_instance *self, const char *name, struct i
         out->fn = __net_recvfrom;
         out->param_count = 6;
         return 0;
-    } else if(strcmp(name, "net##_get_immediate_fd") == 0) {
-        out->fn = __net_get_immediate_fd;
-        out->param_count = 0;
+    } else if(strcmp(name, "net##_eventfd_sem") == 0) {
+        out->fn = __net_eventfd_sem;
+        out->param_count = 1;
         return 0;
     } else if(strcmp(name, "net##_epoll_create") == 0) {
         out->fn = __net_epoll_create;
@@ -389,7 +376,7 @@ int __init init_module(void) {
     _sys_recvfrom = (void *) kallsyms_lookup_name("sys_recvfrom");
     _sys_timerfd_create = (void *) kallsyms_lookup_name("sys_timerfd_create");
     _sys_timerfd_settime = (void *) kallsyms_lookup_name("sys_timerfd_settime");
-    _sys_eventfd = (void *) kallsyms_lookup_name("sys_eventfd");
+    _sys_eventfd2 = (void *) kallsyms_lookup_name("sys_eventfd2");
 
     if(
         !_sys_epoll_create ||
@@ -401,7 +388,7 @@ int __init init_module(void) {
         !_sys_recvfrom ||
         !_sys_timerfd_create ||
         !_sys_timerfd_settime ||
-        !_sys_eventfd
+        !_sys_eventfd2
     ) {
         printk(KERN_INFO "Unable to find some internal symbols.\n");
         return -EINVAL;
