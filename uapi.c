@@ -13,6 +13,7 @@
 #include <linux/security.h>
 #include <linux/kthread.h>
 #include <asm/fpu/api.h>
+#include <asm/fpu/internal.h>
 
 #include "vm.h"
 #include "request.h"
@@ -177,6 +178,7 @@ static void code_runner_sched_in(struct preempt_notifier *notifier, int cpu) {
     struct execution_engine *ee = container_of(notifier, struct execution_engine, preempt_notifier);
     ee->preempt_in_count++;
     kernel_fpu_begin();
+    fpu__restore(&current->thread.fpu);
     preempt_enable();
 }
 
@@ -184,6 +186,7 @@ static void code_runner_sched_out(struct preempt_notifier *notifier, struct task
     struct execution_engine *ee = container_of(notifier, struct execution_engine, preempt_notifier);
     ee->preempt_out_count++;
     preempt_disable();
+    fpu__save(&current->thread.fpu);
     kernel_fpu_end();
 }
 
