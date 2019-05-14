@@ -12,6 +12,7 @@
 #include <linux/cred.h>
 #include <linux/security.h>
 #include <linux/kthread.h>
+#include <asm/fpu/api.h>
 
 #include "vm.h"
 #include "request.h"
@@ -172,6 +173,25 @@ struct code_runner_task {
     struct file *stdin, *stdout, *stderr;
 };
 
+static void code_runner_sched_in(struct preempt_notifier *notifier, int cpu) {
+    struct execution_engine *ee = container_of(notifier, struct execution_engine, preempt_notifier);
+    ee->preempt_in_count++;
+    kernel_fpu_begin();
+    preempt_enable();
+}
+
+static void code_runner_sched_out(struct preempt_notifier *notifier, struct task_struct *next) {
+    struct execution_engine *ee = container_of(notifier, struct execution_engine, preempt_notifier);
+    ee->preempt_out_count++;
+    preempt_disable();
+    kernel_fpu_end();
+}
+
+static struct preempt_ops code_runner_preempt_ops = {
+    .sched_in = code_runner_sched_in,
+    .sched_out = code_runner_sched_out,
+};
+
 void code_runner_inner(struct Coroutine *co) {
     int fd;
 
@@ -215,6 +235,13 @@ void code_runner_inner(struct Coroutine *co) {
     }
     fd_install(fd, task->stderr);
     printk(KERN_INFO "stderr = %d\n", fd);
+
+    kernel_fpu_begin();
+
+    preempt_notifier_init(&task->ee->preempt_notifier, &code_runner_preempt_ops);
+    preempt_notifier_register(&task->ee->preempt_notifier);
+
+    preempt_enable();
 
     if(task->req->param_count != 0) {
         printk(KERN_INFO "invalid param count\n");
@@ -360,6 +387,8 @@ static ssize_t handle_wasm_run_code(struct file *f, void *arg) {
     }
     get_task_struct(runner_ts);
     task.runner_ts = runner_ts;
+
+    preempt_notifier_inc();
     wake_up_process(runner_ts);
 
     down(&task.exec_start); // wait for execution start
@@ -386,6 +415,9 @@ static ssize_t handle_wasm_run_code(struct file *f, void *arg) {
     if(made_nx) {
         ee_make_code_x(&sess->ee);
     }
+
+    preempt_notifier_dec();
+    printk(KERN_INFO "preempt_in = %llu, preempt_out = %llu\n", sess->ee.preempt_in_count, sess->ee.preempt_out_count);
 
     if(copy_to_user(
         req.result,

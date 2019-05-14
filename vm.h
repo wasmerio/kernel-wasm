@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/slab.h>
+#include <linux/preempt.h>
 #include <asm/cacheflush.h>
 #include "kapi.h"
 
@@ -85,6 +86,9 @@ struct execution_engine {
     struct vm_struct *static_memory_vm;
     struct page **memory_pages;
     int memory_page_count;
+
+    struct preempt_notifier preempt_notifier;
+    uint64_t preempt_in_count, preempt_out_count;
 };
 
 // We are assuming that no concurrent access to a session would ever happen - is this true?
