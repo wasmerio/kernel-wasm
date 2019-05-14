@@ -65,4 +65,4 @@ Currently known security risks and their solutions:
 - [x] Stack overflow check (implemented with explicit bound checking in codegen)
 - [x] Memory bound check (implemented with 6GB virtual address space)
 - [x] Forceful termination (implemented by setting NX on code pages)
-- [ ] Floating point (should implement with `kernel_fpu_{begin,end}` and `preempt_notifier`)
+- [x] Floating point (should implement with `kernel_fpu_{begin,end}` and `preempt_notifier`)
