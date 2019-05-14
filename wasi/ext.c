@@ -5,10 +5,7 @@
 #include "../kapi.h"
 #include "../vm.h"
 #include "def.h"
-#include "../async.h"
 
-int async_init(void);
-void async_destroy(void);
 
 struct import_resolver *resolver;
 
@@ -309,128 +306,6 @@ int __wasi_path_open(
     return __WASI_EINVAL;
 }
 
-#define WORK_TYPE_READ 1
-#define WORK_TYPE_WRITE 2
-
-struct wasi_work {
-    struct work_struct work_s;
-    struct task_event task_ev;
-
-    struct task_event_notifier *notifier;
-    int result;
-    uint32_t private_data;
-
-    int work_type;
-    union {
-        struct {
-            struct file *file;
-            uint8_t *buf;
-            uint32_t buf_len;
-        } work_read, work_write;
-    } inner_work;
-};
-
-int __wasi_async_sys_poll(
-    struct vmctx *ctx,
-    wasm_pointer_t result_out,
-    wasm_pointer_t private_data_out
-) {
-    struct task_event *ev;
-    struct wasi_work *work;
-    struct execution_engine *ee = (void *) ctx;
-    int *result_p = (void *) vmctx_get_memory_slice(ctx, result_out, sizeof(int));
-    uint32_t *private_data_p = (void *) vmctx_get_memory_slice(ctx, private_data_out, sizeof(uint32_t));
-
-    if(!result_p || !private_data_p) {
-        return __WASI_EFAULT;
-    }
-
-    ev = async_listen_event_interruptible(ee->notifier);
-    if(!ev) {
-        return __WASI_EINTR;
-    }
-
-    work = container_of(ev, struct wasi_work, task_ev);
-    *result_p = work->result;
-    *private_data_p = work->private_data;
-    kfree(work);
-    return __WASI_ESUCCESS;
-}
-
-static void wasi_work_release_on_error(struct task_event *ev) {
-    struct wasi_work *work = container_of(ev, struct wasi_work, task_ev);
-    kfree(work);
-}
-
-static void async_read_handler(struct work_struct *ws) {
-    struct wasi_work *work = container_of(ws, struct wasi_work, work_s);
-    struct file *file = work->inner_work.work_read.file;
-    struct task_event_notifier *notifier;
-    loff_t pos;
-
-    pos = file_pos_read(file);
-    work->result = kernel_read(
-        file,
-        work->inner_work.work_read.buf,
-        work->inner_work.work_read.buf_len,
-        &pos
-    );
-    if(work->result > 0) {
-        file_pos_write(file, pos);
-    }
-
-    INIT_LIST_HEAD(&work->task_ev.entry);
-    work->task_ev.release_on_error = wasi_work_release_on_error;
-
-    notifier = work->notifier;
-    work->notifier = NULL;
-
-    async_notify_event(notifier, &work->task_ev);
-
-    put_task_event_notifier(notifier);
-    fput(file);
-}
-
-int __wasi_async_fd_read_async(
-    struct vmctx *ctx,
-    __wasi_fd_t fd,
-    wasm_pointer_t buf,
-    uint32_t buf_len,
-    uint32_t private_data
-) {
-    struct execution_engine *ee = (void *) ctx;
-    struct wasi_work *work;
-    uint8_t *buf_p;
-    struct file *file;
-
-    buf_p = vmctx_get_memory_slice(ctx, buf, buf_len);
-    if(!buf_p) return __WASI_EFAULT;
-
-    file = fget(fd);
-    if(!file) return __WASI_EBADF;
-
-    work = kmalloc(sizeof(struct wasi_work), GFP_KERNEL);
-    if(!work) {
-        fput(file);
-        return __WASI_ENOMEM;
-    }
-
-    work->notifier = ee->notifier;
-    get_task_event_notifier(work->notifier);
-
-    work->result = -1;
-    work->private_data = private_data;
-    work->work_type = WORK_TYPE_READ;
-    work->inner_work.work_read.file = file;
-    work->inner_work.work_read.buf = buf_p;
-    work->inner_work.work_read.buf_len = buf_len;
-
-    INIT_WORK(&work->work_s, async_read_handler);
-    async_start_task(&work->work_s);
-
-    return 0;
-}
-
 GEN_POLYFILL_2(_fd_fdstat_get);
 
 int do_resolve(struct import_resolver_instance *self, const char *name, struct import_info *out) {
@@ -485,14 +360,6 @@ int do_resolve(struct import_resolver_instance *self, const char *name, struct i
     } else if(strcmp(name, "wasi_unstable##path_open") == 0) {
         out->fn = __wasi_path_open;
         out->param_count = 9;
-        return 0;
-    } else if(strcmp(name, "wasi_async##fd_read_async") == 0) {
-        out->fn = __wasi_async_fd_read_async;
-        out->param_count = 4;
-        return 0;
-    } else if(strcmp(name, "wasi_async##sys_poll") == 0) {
-        out->fn = __wasi_async_sys_poll;
-        out->param_count = 2;
         return 0;
     } else {
         return -EINVAL;

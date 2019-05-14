@@ -9,9 +9,6 @@ void destroy_global_registry(void);
 int vm_init(void);
 void vm_cleanup(void);
 
-int async_init(void);
-void async_cleanup(void);
-
 int __init init_module(void) {
     if(uapi_init() != 0) {
         return -EINVAL;
@@ -25,18 +22,11 @@ int __init init_module(void) {
         uapi_cleanup();
         return -EINVAL;
     }
-    if(async_init() != 0) {
-        vm_cleanup();
-        destroy_global_registry();
-        uapi_cleanup();
-        return -EINVAL;
-    }
     printk(KERN_INFO "linux-ext-wasm: Module loaded\n");
     return 0;
 }
 
 void __exit cleanup_module(void) {
-    async_cleanup();
     vm_cleanup();
     destroy_global_registry();
     uapi_cleanup();

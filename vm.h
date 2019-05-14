@@ -9,7 +9,6 @@
 #include <linux/slab.h>
 #include <asm/cacheflush.h>
 #include "kapi.h"
-#include "async.h"
 
 #define MAX_CODE_SIZE (1048576 * 8)
 #define MAX_MEMORY_SIZE (1048576 * 16)
@@ -86,8 +85,6 @@ struct execution_engine {
     struct vm_struct *static_memory_vm;
     struct page **memory_pages;
     int memory_page_count;
-
-    struct task_event_notifier *notifier;
 };
 
 // We are assuming that no concurrent access to a session would ever happen - is this true?

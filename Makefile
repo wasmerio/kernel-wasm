@@ -1,5 +1,5 @@
 obj-m += kernel-wasm.o
-kernel-wasm-objs += ext.o uapi.o kapi.o vm.o async.o
+kernel-wasm-objs += ext.o uapi.o kapi.o vm.o
 HDR_PATH := /lib/modules/$(shell uname -r)/build
 
 all:
