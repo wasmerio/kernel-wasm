@@ -28,7 +28,9 @@ Also, having low-level control means that we can implement a lot of features tha
 
 ## Examples and benchmark
 
-There are two examples (`echo-server` and `http-server`) in the `examples` directory of Wasmer main repo, implementing features as their names suggest. When compiled with the `singlepass` backend (unoptimized direct x86-64 code generation) and benchmarked using `tcpkali`/`wrk`, `echo-server` is ~10% faster (25210 Mbps / 22820 Mbps) than its native equivalent, and `http-server` is ~6% faster (53293 Rps / 50083 Rps). Even higher performance is expected when the other two Wasmer backends with optimizations (Cranelift/LLVM) are updated to support generating code for the kernel.
+There are two examples (`echo-server` and `http-server`) in the `examples` directory of Wasmer main repo, implementing features as their names suggest.
+
+When compiled with the `singlepass` backend (unoptimized direct x86-64 code generation) and benchmarked using `tcpkali`/`wrk`, `echo-server` is ~10% faster (25210 Mbps / 22820 Mbps) than its native equivalent, and `http-server` is ~6% faster (53293 Rps / 50083 Rps). Even higher performance is expected when the other two Wasmer backends with optimizations (Cranelift/LLVM) are updated to support generating code for the kernel.
 
 Those two examples use both WASI (for file abstraction and printing) and the asynchronous networking extension (via the `kwasm-net` crate). Take a look at them to learn how to do high-performance networking in kernel-wasm.
 
@@ -57,10 +59,11 @@ sudo insmod wasi/kwasm-wasi.ko
 sudo insmod networking/kwasm-networking.ko
 ```
 
-Select the `kernel` loader and `singlepass` backend when running Wasmer:
+Builder Wasmer with the necessary features enabled, and select the `kernel` loader and `singlepass` backend when running Wasmer:
 
 ```
-sudo wasmer run --backend singlepass --disable-cache --loader kernel your_wasm_file.wasm
+cargo build --release --features backend:singlepass,loader:kwasm
+sudo ./target/release/wasmer run --backend singlepass --disable-cache --loader kernel your_wasm_file.wasm
 ```
 
 ## Security
