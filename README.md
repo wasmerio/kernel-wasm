@@ -59,11 +59,10 @@ sudo insmod wasi/kwasm-wasi.ko
 sudo insmod networking/kwasm-networking.ko
 ```
 
-Builder Wasmer with the necessary features enabled, and select the `kernel` loader and `singlepass` backend when running Wasmer:
+Run wasmer with the `kernel` loader and `singlepass` backend:
 
 ```
-cargo build --release --features backend:singlepass,loader:kwasm
-sudo ./target/release/wasmer run --backend singlepass --disable-cache --loader kernel your_wasm_file.wasm
+sudo wasmer run --backend singlepass --disable-cache --loader kernel your_wasm_file.wasm
 ```
 
 ## Security
