@@ -1,9 +1,12 @@
-obj-m += kernel-wasm.o
-kernel-wasm-objs += ext.o uapi.o kapi.o vm.o
-HDR_PATH := /lib/modules/$(shell uname -r)/build
+HDR_PATH := /lib/modules/$(shell uname -r)
 
-all:
-	make -C $(HDR_PATH) M=$(PWD) modules
+default:
+	$(MAKE) -C $(HDR_PATH)/build M=$(PWD) modules
+
+install:
+	sudo $(MAKE) -C $(HDR_PATH)/build M=$(PWD) modules_install
+	sudo depmod -a
 
 clean:
-	make -C $(HDR_PATH) M=$(PWD) clean
+	$(MAKE) -C $(HDR_PATH)/build M=$(PWD) clean
+	rm $(shell find ${HDR_PATH} -name "*wasm*")
