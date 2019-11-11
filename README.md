@@ -46,17 +46,20 @@ Then just run `make` in the root directory, and (optionally) `networking` and `w
 
 ```
 make
-cd networking && make
-cd ../wasi && make
-cd ..
+```
+
+Install the modules into `/lib/modules/\`uname -r\`/extra`
+
+```
+make install
 ```
 
 Load the modules:
 
 ```
-sudo insmod kernel-wasm.ko
-sudo insmod wasi/kwasm-wasi.ko
-sudo insmod networking/kwasm-networking.ko
+sudo modprobe kernel-wasm
+sudo modprobe kwasm-networking
+sudo modprobe kwasm-wasi
 ```
 
 Run wasmer with the `kernel` loader and `singlepass` backend:
