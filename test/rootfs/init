@@ -1,0 +1,4 @@
+#!/bin/sh
+
+/run.sh
+/bin/busybox sleep 60

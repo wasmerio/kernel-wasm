@@ -42,7 +42,7 @@ static int resolve_import(const char *name, uint32_t param_count, struct executi
     if(out->func == NULL) {
         return -EINVAL;
     } else {
-        out->ctx = &ee->ctx;
+        out->ctx_indirect = &ee->ctx_indirect;
         //printk(KERN_INFO "Resolve: %s -> %px\n", name, out->func);
         return 0;
     }
@@ -285,6 +285,7 @@ int init_execution_engine(const struct load_code_request *request, struct execut
     }
     ee->stack_begin = (void *) round_up_to_page_size((unsigned long) ee->stack_backing);
     ee->stack_end = (void *) (((unsigned long) ee->stack_backing + STACK_SIZE) & (~0xful)); // 16-byte alignment
+    ee->ctx_indirect = &ee->ctx;
 
     // FIXME: Accessing the stack guard triggers a triple fault.
     _set_memory_ro((unsigned long) ee->stack_begin, STACK_GUARD_SIZE / 4096);
