@@ -66,7 +66,9 @@ struct local_table {
 
 struct imported_func {
     void *func;
-    struct vmctx *ctx;
+
+    // Corresponds to `FuncCtx` in Wasmer, but only has one (the first) field which is used in generated code.
+    struct vmctx **ctx_indirect;
 };
 
 struct execution_engine {
@@ -82,6 +84,7 @@ struct execution_engine {
     uint8_t *stack_begin;
     uint8_t *stack_end;
     uint8_t *stack_backing;
+    struct vmctx *ctx_indirect;
 
     struct vm_struct *static_memory_vm;
     struct page **memory_pages;
