@@ -156,11 +156,9 @@ int __wasi_args_sizes_get(
     return __WASI_ESUCCESS;
 }
 
-extern int sys_close(unsigned int fd);
 int __wasi_fd_close(struct vmctx *ctx, __wasi_fd_t fd) {
     int ret;
-    //ret = __close_fd(current->files, fd);
-    ret = sys_close(fd);
+    ret = __close_fd(current->files, fd);
     if(ret < 0) return __WASI_EBADF;
     return __WASI_ESUCCESS;
 }
