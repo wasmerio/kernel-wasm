@@ -48,7 +48,7 @@ Then just run `make` in the root directory, and (optionally) `networking` and `w
 make
 ```
 
-Install the modules into `/lib/modules/\`uname -r\`/extra`
+Install the modules into ``/lib/modules/`uname -r`/extra``
 
 ```
 make install
